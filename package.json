@@ -1,0 +1,21 @@
+{
+  "name": "bumblebee-hive",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Cloudflare Worker receiver for Bumblebee inventory transport data.",
+  "scripts": {
+    "build": "tsc --noEmit",
+    "typecheck": "tsc --noEmit",
+    "lint": "tsc --noEmit --pretty false",
+    "test": "vitest run",
+    "test:e2e": "vitest run test/e2e.test.ts"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260526.1",
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.7",
+    "wrangler": "^4.95.0"
+  }
+}
