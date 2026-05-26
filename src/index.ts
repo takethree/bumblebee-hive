@@ -31,6 +31,7 @@ const timestampHeader = "X-Inventory-Timestamp";
 const deviceHeader = "X-Inventory-Device-Id";
 const accessClientIDHeader = "CF-Access-Client-Id";
 const accessClientSecretHeader = "CF-Access-Client-Secret";
+const accessJWTHeader = "Cf-Access-Jwt-Assertion";
 const defaultMaxBodyBytes = 5 * 1024 * 1024;
 const defaultTimestampSkewSeconds = 300;
 
@@ -144,6 +145,13 @@ async function ingest(request: Request, env: Env): Promise<Response> {
 }
 
 function requireAccess(request: Request, env: Env): void {
+  // Cloudflare Access consumes service-token headers at the edge and forwards
+  // an application JWT to the Worker. Keep direct header support for local
+  // development and non-Access deployments.
+  if (request.headers.get(accessJWTHeader)) {
+    return;
+  }
+
   const clientID = request.headers.get(accessClientIDHeader);
   const clientSecret = request.headers.get(accessClientSecretHeader);
   if (!constantTimeEqual(clientID || "", env.ACCESS_CLIENT_ID) ||

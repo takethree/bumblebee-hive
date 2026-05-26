@@ -5,6 +5,8 @@ Bumblebee Hive is a Cloudflare Worker receiver for Bumblebee inventory transport
 The v0.1 receiver is intentionally small:
 
 - protects `/v1/enroll` and `/v1/ingest` with Cloudflare Access service-token headers;
+- accepts the Cloudflare Access JWT forwarded to the Worker after Access
+  authenticates the request;
 - verifies Bumblebee HMAC signatures against the exact raw request body;
 - decompresses gzip only after HMAC verification;
 - stores accepted raw batches in R2;

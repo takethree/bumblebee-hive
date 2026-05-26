@@ -160,6 +160,21 @@ describe("bumblebee hive worker", () => {
     expect(response.status).toBe(401);
   });
 
+  it("accepts Cloudflare Access forwarded JWT header", async () => {
+    const env = makeEnv();
+    const response = await worker.fetch(new Request("https://hive.example.test/v1/enroll", {
+      method: "POST",
+      headers: {
+        "Cf-Access-Jwt-Assertion": "edge-issued-jwt",
+        "X-Hive-Enroll-Token": "enroll-token"
+      },
+      body: JSON.stringify({ device_id: "device-jwt" })
+    }), env);
+
+    expect(response.status).toBe(201);
+    expect(env.DB.devices.has("device-jwt")).toBe(true);
+  });
+
   it("rejects body signatures computed over a different gzip payload", async () => {
     const env = makeEnv();
     const hmacKey = "device-secret";
