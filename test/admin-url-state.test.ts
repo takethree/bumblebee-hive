@@ -92,17 +92,17 @@ function makeHarness(initialURL: string): {
             return { counts: { healthy: 0, stale: 0, attention: 0, unknown: 0 }, config: { profile: "baseline", expected_cadence_hours: 6, stale_hours: 24, weekend_grace_hours: 48 }, devices: [] };
           }
           if (pathname.includes("/runs")) {
-            return { runs: [] };
+            return { runs: [], limit: 50, offset: 0, total: 0, page: 1, page_count: 0, has_more: false };
           }
           if (pathname.includes("/packages")) {
-            return { packages: [] };
+            return { packages: [], limit: 50, offset: 0, total: 0, page: 1, page_count: 0, has_more: false };
           }
           if (pathname.match(/\/devices\/[^/]+$/)) {
             const deviceID = decodeURIComponent(pathname.split("/").at(-1) || "");
             return { device: { device_id: deviceID, status: "active", run_count: 1, batch_count: 1, record_count: 1 }, lifecycle_events: [], recent_runs: [] };
           }
           if (pathname.includes("/devices")) {
-            return { devices: [] };
+            return { devices: [], limit: 50, offset: 0, total: 0, page: 1, page_count: 0, has_more: false };
           }
           return {};
         }
@@ -183,5 +183,28 @@ describe("admin URL state", () => {
     expect(admin.currentAdminPath()).toBe("/admin/devices/device-3?inventory_view=observations&run_status=error");
     expect(harness.packageViewInputs.find((input) => input.value === "observations")?.checked).toBe(true);
     expect(harness.listeners.has("popstate")).toBe(true);
+  });
+
+  it("hydrates pagination params and pushes page changes into the URL", async () => {
+    const harness = makeHarness("https://hive.example.test/admin/devices/device-1?inventory_view=package&device_page=2&inventory_page=3&run_page=4&detail_inventory_page=5");
+    const admin = await loadAdminApp(harness);
+
+    expect(admin.currentAdminPath()).toBe("/admin/devices/device-1?device_page=2&inventory_view=package&inventory_page=3&run_page=4&detail_inventory_page=5");
+
+    await admin.setPage("inventoryPage", 6, async () => undefined);
+    expect(harness.pushes.at(-1)).toBe("/admin/devices/device-1?device_page=2&inventory_view=package&inventory_page=6&run_page=4&detail_inventory_page=5");
+  });
+
+  it("resets relevant page state when filters change", async () => {
+    const harness = makeHarness("https://hive.example.test/admin/?inventory_view=summary&inventory_page=4&run_page=3&device_page=2");
+    const admin = await loadAdminApp(harness);
+
+    harness.elements.get("package-query")!.value = "needle";
+    harness.elements.get("package-query")!.listeners.get("input")?.({} as Event);
+    expect(admin.currentAdminPath()).toBe("/admin/?device_page=2&inventory_view=summary&package_query=needle&run_page=3");
+
+    harness.elements.get("run-status")!.value = "complete";
+    harness.elements.get("run-status")!.listeners.get("change")?.({} as Event);
+    expect(admin.currentAdminPath()).toBe("/admin/?device_page=2&inventory_view=summary&package_query=needle&run_status=complete");
   });
 });

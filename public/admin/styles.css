@@ -294,6 +294,49 @@ tr[data-device-id]:hover {
   background: #eef8fa;
 }
 
+.pagination {
+  align-items: center;
+  border-top: 1px solid var(--line);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 14px;
+  justify-content: space-between;
+  padding: 12px 16px;
+}
+
+.pagination:empty {
+  display: none;
+}
+
+.pagination span {
+  color: var(--muted);
+}
+
+.page-buttons {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.page-buttons button {
+  min-width: 38px;
+}
+
+.page-buttons button[aria-current="page"] {
+  background: #fff;
+  color: var(--brand-dark);
+}
+
+.page-buttons button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.page-gap {
+  padding: 0 3px;
+}
+
 .status {
   border-radius: 999px;
   display: inline-block;

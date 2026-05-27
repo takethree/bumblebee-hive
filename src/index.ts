@@ -227,6 +227,10 @@ interface NormalizationResult {
   promotedCurrent: boolean;
 }
 
+interface CountRow {
+  total: number;
+}
+
 interface ValidatedRecords {
   runID: string;
   summary: InventoryRecord | null;
@@ -946,14 +950,14 @@ async function adminDevicesData(env: Env, url: URL): Promise<object> {
     : status === "disabled"
       ? "WHERE d.disabled_at IS NOT NULL"
       : "";
+  const count = await env.DB.prepare(`SELECT COUNT(*) AS total FROM devices d ${where}`).first<CountRow>();
   const rows = await allRows<AdminDeviceRow>(
     env.DB.prepare(`${adminDeviceSelect()} ${where} ORDER BY COALESCE(last_run_received_at, d.created_at) DESC LIMIT ? OFFSET ?`).bind(limit, offset)
   );
 
   return {
     devices: rows.map(formatAdminDeviceRow),
-    limit,
-    offset,
+    ...paginationMeta(count?.total || 0, limit, offset),
     status
   };
 }
@@ -1024,16 +1028,16 @@ async function adminRunsData(env: Env, url: URL): Promise<object> {
   }
   const limit = boundedIntParam(url.searchParams, "limit", 50, 100);
   const offset = boundedIntParam(url.searchParams, "offset", 0, 100000);
-  values.push(limit, offset);
   const whereSQL = where.length ? `WHERE ${where.join(" AND ")}` : "";
+  const count = await env.DB.prepare(`SELECT COUNT(*) AS total FROM runs r ${whereSQL}`).bind(...values).first<CountRow>();
+  values.push(limit, offset);
   const rows = await allRows<AdminRunRow>(
     env.DB.prepare(`${adminRunSelect()} ${whereSQL} ORDER BY r.received_at DESC LIMIT ? OFFSET ?`).bind(...values)
   );
 
   return {
     runs: rowsWithCounts(rows),
-    limit,
-    offset
+    ...paginationMeta(count?.total || 0, limit, offset)
   };
 }
 
@@ -1091,12 +1095,12 @@ async function adminPackagesData(env: Env, url: URL, rawDeviceID: string | null)
   const offset = boundedIntParam(url.searchParams, "offset", 0, 100000);
   const pageValues = [...values, limit, offset];
   const whereSQL = where.length ? `WHERE ${where.join(" AND ")}` : "";
+  const count = await packageCountForView(env, view, whereSQL, values);
   const packages = await packageRowsForView(env, view, whereSQL, pageValues);
   return {
     view,
     packages,
-    limit,
-    offset,
+    ...paginationMeta(count, limit, offset),
     query,
     device_id: deviceParam ? sanitizeDeviceID(deviceParam) : null
   };
@@ -1134,6 +1138,51 @@ async function packageRowsForView(
     env.DB.prepare(`${adminPackageSelect()} ${whereSQL} ORDER BY normalized_name ASC, version ASC, device_id ASC LIMIT ? OFFSET ?`).bind(...pageValues)
   );
   return rows.map(formatPackageRow);
+}
+
+async function packageCountForView(
+  env: Env,
+  view: PackageView,
+  whereSQL: string,
+  values: (string | number)[]
+): Promise<number> {
+  if (view === "package") {
+    const count = await env.DB.prepare(
+      `SELECT COUNT(*) AS total FROM (
+        SELECT 1 FROM inventory_current
+        ${whereSQL}
+        GROUP BY device_id, profile, ecosystem, normalized_name
+      ) grouped_packages`
+    ).bind(...values).first<CountRow>();
+    return count?.total || 0;
+  }
+  if (view === "summary") {
+    const count = await env.DB.prepare(
+      `SELECT COUNT(*) AS total FROM (
+        SELECT 1 FROM inventory_current
+        ${whereSQL}
+        GROUP BY device_id, profile, ecosystem, normalized_name, version
+      ) grouped_packages`
+    ).bind(...values).first<CountRow>();
+    return count?.total || 0;
+  }
+  const count = await env.DB.prepare(`SELECT COUNT(*) AS total FROM inventory_current ${whereSQL}`).bind(...values).first<CountRow>();
+  return count?.total || 0;
+}
+
+function paginationMeta(total: number, limit: number, offset: number): object {
+  const safeTotal = Math.max(0, Math.trunc(total));
+  const safeLimit = Math.max(1, Math.trunc(limit));
+  const safeOffset = Math.max(0, Math.trunc(offset));
+  const pageCount = safeTotal === 0 ? 0 : Math.ceil(safeTotal / safeLimit);
+  return {
+    limit: safeLimit,
+    offset: safeOffset,
+    total: safeTotal,
+    page: Math.floor(safeOffset / safeLimit) + 1,
+    page_count: pageCount,
+    has_more: safeOffset + safeLimit < safeTotal
+  };
 }
 
 function adminDeviceSelect(): string {

@@ -102,6 +102,28 @@ class MemoryStmt {
         total_records: this.db.batchRows().reduce((total, batch) => total + batch.record_count, 0)
       } as T;
     }
+    if (this.sql.startsWith("SELECT COUNT(*) AS total FROM devices d")) {
+      let rows = this.db.adminDeviceRows();
+      if (this.sql.includes("WHERE d.disabled_at IS NULL")) {
+        rows = rows.filter((row) => !row.disabled_at);
+      } else if (this.sql.includes("WHERE d.disabled_at IS NOT NULL")) {
+        rows = rows.filter((row) => row.disabled_at);
+      }
+      return { total: rows.length } as T;
+    }
+    if (this.sql.startsWith("SELECT COUNT(*) AS total FROM runs r")) {
+      return { total: this.filteredRunRows().length } as T;
+    }
+    if (this.sql.startsWith("SELECT COUNT(*) AS total") && this.sql.includes("FROM inventory_current")) {
+      const rows = this.filteredCurrentRows();
+      if (this.sql.includes("GROUP BY device_id, profile, ecosystem, normalized_name, version")) {
+        return { total: this.packageSummaryRows(rows).length } as T;
+      }
+      if (this.sql.includes("GROUP BY device_id, profile, ecosystem, normalized_name")) {
+        return { total: this.packageFamilyRows(rows).length } as T;
+      }
+      return { total: rows.length } as T;
+    }
     if (this.sql.includes("FROM devices d") && this.sql.includes("WHERE d.device_id = ?")) {
       return (this.db.adminDeviceRows().find((row) => row.device_id === String(this.values[0])) || null) as T | null;
     }
@@ -325,6 +347,49 @@ class MemoryStmt {
     const offset = hasBoundPage ? lastValue : 0;
     const limit = hasBoundPage ? previousValue : this.sql.includes("LIMIT 10") ? 10 : rows.length;
     return rows.slice(offset, offset + limit);
+  }
+
+  private filteredRunRows(): ReturnType<MemoryD1["adminRunRows"]> {
+    let rows = this.db.adminRunRows();
+    let valueIndex = 0;
+    if (this.sql.includes("r.device_id = ?")) {
+      const deviceID = String(this.values[valueIndex++]);
+      rows = rows.filter((row) => row.device_id === deviceID);
+    }
+    if (this.sql.includes("r.status = ?")) {
+      const status = String(this.values[valueIndex++]);
+      rows = rows.filter((row) => row.status === status);
+    }
+    if (this.sql.includes("r.profile = ?")) {
+      const profile = String(this.values[valueIndex++]);
+      rows = rows.filter((row) => row.profile === profile);
+    }
+    return rows;
+  }
+
+  private filteredCurrentRows(): ReturnType<MemoryD1["currentRows"]> {
+    let rows = this.db.currentRows();
+    let valueIndex = 0;
+    if (this.sql.includes("device_id = ?")) {
+      const deviceID = String(this.values[valueIndex++]);
+      rows = rows.filter((row) => row.device_id === deviceID);
+    }
+    if (this.sql.includes("ecosystem = ?")) {
+      const ecosystem = String(this.values[valueIndex++]);
+      rows = rows.filter((row) => row.ecosystem === ecosystem);
+    }
+    if (this.sql.includes("profile = ?")) {
+      const profile = String(this.values[valueIndex++]);
+      rows = rows.filter((row) => row.profile === profile);
+    }
+    if (this.sql.includes("normalized_name LIKE ?")) {
+      const query = String(this.values[valueIndex++]).replace(/^%|%$/g, "").toLowerCase();
+      rows = rows.filter((row) =>
+        row.normalized_name.toLowerCase().includes(query) ||
+        row.package_name.toLowerCase().includes(query)
+      );
+    }
+    return rows;
   }
 
   private sortValue(row: unknown): string {
@@ -1167,6 +1232,59 @@ describe("bumblebee hive worker", () => {
     expect(forbiddenVisibilityFields(familyBody)).toEqual([]);
   });
 
+  it("returns exact pagination metadata for package views and device-scoped packages", async () => {
+    const env = makeEnv();
+    const hmacKey = "device-secret";
+    await addDevice(env, "device-1", hmacKey);
+    await addDevice(env, "device-2", hmacKey);
+    const deviceOneNDJSON = [
+      JSON.stringify(packageRecord("run-1", "device-1", "left-pad", "1.0.0")),
+      JSON.stringify(packageRecord("run-1", "device-1", "left-pad", "2.0.0")),
+      JSON.stringify(summaryRecord("run-1", "device-1"))
+    ].join("\n") + "\n";
+    const deviceTwoNDJSON = [
+      JSON.stringify(packageRecord("run-2", "device-2", "left-pad", "1.0.0")),
+      JSON.stringify(summaryRecord("run-2", "device-2"))
+    ].join("\n") + "\n";
+
+    await worker.fetch(await signedRequest(env, gzipSync(deviceOneNDJSON), hmacKey, {
+      "X-Inventory-Device-Id": "device-1"
+    }), env);
+    await worker.fetch(await signedRequest(env, gzipSync(deviceTwoNDJSON), hmacKey, {
+      "X-Inventory-Device-Id": "device-2"
+    }), env);
+    await testInternals.normalizeQueuedBatch(env, env.NORMALIZE_QUEUE.messages[0] as { device_id: string; run_id: string; batch_id: string });
+    await testInternals.normalizeQueuedBatch(env, env.NORMALIZE_QUEUE.messages[1] as { device_id: string; run_id: string; batch_id: string });
+
+    const familyResponse = await worker.fetch(new Request("https://hive.example.test/v1/admin/packages?query=left-pad&view=package&limit=1&offset=1", {
+      headers: adminHeaders(env)
+    }), env);
+    const summaryResponse = await worker.fetch(new Request("https://hive.example.test/v1/admin/packages?query=left-pad&view=summary&limit=1&offset=0", {
+      headers: adminHeaders(env)
+    }), env);
+    const observationResponse = await worker.fetch(new Request("https://hive.example.test/v1/admin/packages?query=left-pad&view=observations&limit=2&offset=0", {
+      headers: adminHeaders(env)
+    }), env);
+    const deviceResponse = await worker.fetch(new Request("https://hive.example.test/v1/admin/devices/device-1/packages?query=left-pad&view=summary&limit=1&offset=1", {
+      headers: adminHeaders(env)
+    }), env);
+
+    const familyBody = await familyResponse.json() as { total: number; page: number; page_count: number; has_more: boolean; packages: unknown[] };
+    const summaryBody = await summaryResponse.json() as { total: number; page: number; page_count: number; has_more: boolean; packages: unknown[] };
+    const observationBody = await observationResponse.json() as { total: number; page: number; page_count: number; has_more: boolean; packages: unknown[] };
+    const deviceBody = await deviceResponse.json() as { total: number; page: number; page_count: number; has_more: boolean; packages: unknown[] };
+
+    expect(familyBody).toMatchObject({ total: 2, page: 2, page_count: 2, has_more: false });
+    expect(familyBody.packages).toHaveLength(1);
+    expect(summaryBody).toMatchObject({ total: 3, page: 1, page_count: 3, has_more: true });
+    expect(summaryBody.packages).toHaveLength(1);
+    expect(observationBody).toMatchObject({ total: 3, page: 1, page_count: 2, has_more: true });
+    expect(observationBody.packages).toHaveLength(2);
+    expect(deviceBody).toMatchObject({ total: 2, page: 2, page_count: 2, has_more: false });
+    expect(deviceBody.packages).toHaveLength(1);
+    expect(forbiddenVisibilityFields({ familyBody, summaryBody, observationBody, deviceBody })).toEqual([]);
+  });
+
   it("promotes current inventory only after a complete baseline or project summary", async () => {
     const env = makeEnv();
     const hmacKey = "device-secret";
@@ -1719,9 +1837,10 @@ describe("bumblebee hive worker", () => {
     const activeResponse = await worker.fetch(new Request("https://hive.example.test/v1/admin/devices", {
       headers: adminHeaders(env)
     }), env);
-    const activeBody = await activeResponse.json() as { devices: Array<{ device_id: string; last_run: { run_id: string; profile: string; status: string } }> };
+    const activeBody = await activeResponse.json() as { total: number; page: number; page_count: number; has_more: boolean; devices: Array<{ device_id: string; last_run: { run_id: string; profile: string; status: string } }> };
 
     expect(activeResponse.status).toBe(200);
+    expect(activeBody).toMatchObject({ total: 1, page: 1, page_count: 1, has_more: false });
     expect(activeBody.devices.map((device) => device.device_id)).toEqual(["device-1"]);
     expect(activeBody.devices[0].last_run).toMatchObject({ run_id: "run-1", profile: "baseline", status: "complete" });
     expect(forbiddenVisibilityFields(activeBody)).toEqual([]);
@@ -1729,11 +1848,21 @@ describe("bumblebee hive worker", () => {
     const disabledResponse = await worker.fetch(new Request("https://hive.example.test/v1/admin/devices?status=disabled", {
       headers: adminHeaders(env)
     }), env);
-    const disabledBody = await disabledResponse.json() as { devices: Array<{ device_id: string; status: string }> };
+    const disabledBody = await disabledResponse.json() as { total: number; page: number; page_count: number; has_more: boolean; devices: Array<{ device_id: string; status: string }> };
 
     expect(disabledResponse.status).toBe(200);
+    expect(disabledBody).toMatchObject({ total: 1, page: 1, page_count: 1, has_more: false });
     expect(disabledBody.devices).toEqual([expect.objectContaining({ device_id: "device-2", status: "disabled" })]);
     expect(forbiddenVisibilityFields(disabledBody)).toEqual([]);
+
+    const pageResponse = await worker.fetch(new Request("https://hive.example.test/v1/admin/devices?status=all&limit=1&offset=1", {
+      headers: adminHeaders(env)
+    }), env);
+    const pageBody = await pageResponse.json() as { total: number; page: number; page_count: number; has_more: boolean; devices: unknown[] };
+    expect(pageResponse.status).toBe(200);
+    expect(pageBody).toMatchObject({ total: 2, page: 2, page_count: 2, has_more: false });
+    expect(pageBody.devices).toHaveLength(1);
+    expect(forbiddenVisibilityFields(pageBody)).toEqual([]);
   });
 
   it("returns a device detail with recent run metadata only", async () => {
@@ -1759,11 +1888,21 @@ describe("bumblebee hive worker", () => {
     const response = await worker.fetch(new Request("https://hive.example.test/v1/admin/runs?device_id=device-2&status=partial&profile=full", {
       headers: adminHeaders(env)
     }), env);
-    const body = await response.json() as { runs: Array<{ device_id: string; run_id: string; profile: string; status: string }> };
+    const body = await response.json() as { total: number; page: number; page_count: number; has_more: boolean; runs: Array<{ device_id: string; run_id: string; profile: string; status: string }> };
 
     expect(response.status).toBe(200);
+    expect(body).toMatchObject({ total: 1, page: 1, page_count: 1, has_more: false });
     expect(body.runs).toEqual([expect.objectContaining({ device_id: "device-2", run_id: "run-2", profile: "full", status: "partial" })]);
     expect(forbiddenVisibilityFields(body)).toEqual([]);
+
+    const pageResponse = await worker.fetch(new Request("https://hive.example.test/v1/admin/runs?limit=1&offset=1", {
+      headers: adminHeaders(env)
+    }), env);
+    const pageBody = await pageResponse.json() as { total: number; page: number; page_count: number; has_more: boolean; runs: unknown[] };
+    expect(pageResponse.status).toBe(200);
+    expect(pageBody).toMatchObject({ total: 2, page: 2, page_count: 2, has_more: false });
+    expect(pageBody.runs).toHaveLength(1);
+    expect(forbiddenVisibilityFields(pageBody)).toEqual([]);
   });
 
   it("rejects admin visibility without the admin token", async () => {

@@ -69,7 +69,7 @@ visual_board:
     command: "npx goalbuddy board docs/goals/hive-checkpoint-pagination"
     error: "Local board was not started during prep because npx goalbuddy board failed while fetching the GoalBuddy catalog with HTTP 404. File-backed board remains usable."
 
-active_task: T002
+active_task: T005
 
 tasks:
   - id: T001
@@ -144,7 +144,7 @@ tasks:
   - id: T002
     type: worker
     assignee: Worker
-    status: active
+    status: done
     reasoning_hint: medium
     objective: "Commit and push the current deployed Hive work using the grouping approved by T001."
     allowed_files:
@@ -161,6 +161,7 @@ tasks:
       - "docs/goals/hive-inventory-summary-view/**"
       - "docs/goals/hive-inventory-grouping-preference/**"
       - "docs/goals/hive-admin-url-state-recovery/**"
+      - "docs/goals/hive-checkpoint-pagination/goal.md"
       - "docs/goals/hive-checkpoint-pagination/state.yaml"
       - "docs/goals/hive-checkpoint-pagination/notes/**"
     verify:
@@ -178,12 +179,55 @@ tasks:
       - "A goal split cannot be made without behavior-changing edits."
       - "Verification fails twice for the same reason."
       - "Remote push is rejected for non-fast-forward or auth reasons."
-    receipt: null
+    receipt:
+      result: done
+      changed_files:
+        - "README.md"
+        - "public/admin/app.js"
+        - "public/admin/index.html"
+        - "public/admin/styles.css"
+        - "src/index.ts"
+        - "test/ingest.test.ts"
+        - "test/admin-url-state.test.ts"
+        - "wrangler.toml"
+        - "migrations/0005_normalized_inventory.sql"
+        - "docs/goals/hive-normalized-inventory/goal.md"
+        - "docs/goals/hive-normalized-inventory/state.yaml"
+        - "docs/goals/hive-normalized-inventory/notes/T003-live-validation.md"
+        - "docs/goals/hive-inventory-summary-view/goal.md"
+        - "docs/goals/hive-inventory-summary-view/state.yaml"
+        - "docs/goals/hive-inventory-grouping-preference/goal.md"
+        - "docs/goals/hive-inventory-grouping-preference/state.yaml"
+        - "docs/goals/hive-admin-url-state-recovery/goal.md"
+        - "docs/goals/hive-admin-url-state-recovery/state.yaml"
+        - "docs/goals/hive-checkpoint-pagination/goal.md"
+        - "docs/goals/hive-checkpoint-pagination/state.yaml"
+      commits:
+        - "8fa8ca9 hive: add normalized inventory and admin inventory views"
+        - "efd65ff hive: add admin URL state recovery"
+        - "c139e5d goalbuddy: prepare Hive checkpoint pagination board"
+      commands:
+        - cmd: "npm test"
+          status: pass
+          note: "39 tests passed."
+        - cmd: "npm run typecheck"
+          status: pass
+        - cmd: "npm run lint"
+          status: pass
+        - cmd: "node --check public/admin/app.js"
+          status: pass
+        - cmd: "git diff --check"
+          status: pass
+          note: "Initial trailing blank-line warnings in new docs were fixed before commit."
+        - cmd: "git push origin main"
+          status: pass
+          note: "Pushed main from 0894dc0 to c139e5d."
+      summary: "Checkpointed and pushed the deployed Hive work. The split preserves separable goal docs/tests/board artifacts while keeping interleaved deployed runtime hunks together to avoid unsafe synthetic history."
 
   - id: T003
     type: worker
     assignee: Worker
-    status: queued
+    status: done
     reasoning_hint: medium
     objective: "Implement exact numbered pagination for Hive admin API metadata, admin UI controls, and recoverable URL state."
     allowed_files:
@@ -211,12 +255,42 @@ tasks:
       - "Need to expose raw inventory, raw payloads, raw device IDs, hostnames, usernames, SIDs, full paths, object keys, secrets, HMAC material, summary_json, or live package names."
       - "Need files outside allowed_files."
       - "Verification fails twice for the same reason."
-    receipt: null
+    receipt:
+      result: done
+      changed_files:
+        - "README.md"
+        - "public/admin/app.js"
+        - "public/admin/index.html"
+        - "public/admin/styles.css"
+        - "src/index.ts"
+        - "test/admin-url-state.test.ts"
+        - "test/ingest.test.ts"
+        - "docs/goals/hive-checkpoint-pagination/state.yaml"
+      commands:
+        - cmd: "npm test"
+          status: pass
+          note: "42 tests passed."
+        - cmd: "npm run typecheck"
+          status: pass
+        - cmd: "npm run lint"
+          status: pass
+        - cmd: "node --check public/admin/app.js"
+          status: pass
+        - cmd: "npx wrangler deploy --config wrangler.toml --dry-run"
+          status: pass
+        - cmd: "npx wrangler deploy --config wrangler.deploy.toml --dry-run"
+          status: pass
+        - cmd: "git diff --check"
+          status: pass
+          note: "Only CRLF conversion warnings."
+        - cmd: "GoalBuddy state checker"
+          status: pass
+      summary: "Implemented exact numbered pagination locally. Admin APIs now return additive total/page/page_count/has_more metadata for devices, runs, packages, and device-scoped packages; the admin UI renders numbered pagination controls and preserves page state in recoverable URLs; tests and docs were updated."
 
   - id: T004
     type: worker
     assignee: Worker
-    status: queued
+    status: done
     reasoning_hint: medium
     objective: "Deploy and smoke-test the pagination package if T003 changes production behavior and deploy credentials are available."
     allowed_files:
@@ -232,7 +306,18 @@ tasks:
       - "Need live smoke output that exposes raw inventory, raw payloads, raw device IDs, live package names, hostnames, usernames, SIDs, full paths, object keys, secrets, HMAC material, or summary_json."
       - "Production route, Access, or admin-token behavior regresses."
       - "Verification fails twice for the same reason."
-    receipt: null
+    receipt:
+      result: done
+      changed_files:
+        - "docs/goals/hive-checkpoint-pagination/state.yaml"
+      commands:
+        - cmd: "npx wrangler deploy --config wrangler.deploy.toml"
+          status: pass
+          note: "Worker version 92ae90e2-b1e9-4378-aee4-caa6c7731f90; output confirmed schedule plus queue producer and consumer triggers."
+        - cmd: "Redacted live pagination smoke"
+          status: pass
+          note: "Admin shell and app asset returned 200; served app JS contained detail_inventory_page marker; devices, runs, package, and selected-device package admin endpoints returned 200 with limit/offset/total/page/page_count/has_more keys; forbidden field match counts were zero."
+      summary: "Deployed the pagination bundle and proved live admin pagination metadata plus UI asset markers using redacted aggregate evidence only."
 
   - id: T999
     type: judge
@@ -258,6 +343,39 @@ tasks:
       - "verification evidence"
       - "missing evidence"
       - "next task if not complete"
+    receipt: null
+
+  - id: T005
+    type: worker
+    assignee: Worker
+    status: active
+    reasoning_hint: medium
+    objective: "Commit and push the verified deployed pagination bundle so production state has a matching repository checkpoint."
+    allowed_files:
+      - "README.md"
+      - "public/admin/app.js"
+      - "public/admin/index.html"
+      - "public/admin/styles.css"
+      - "src/index.ts"
+      - "test/admin-url-state.test.ts"
+      - "test/ingest.test.ts"
+      - "docs/goals/hive-checkpoint-pagination/state.yaml"
+      - "docs/goals/hive-checkpoint-pagination/notes/**"
+    verify:
+      - "git status --short --branch --untracked-files=all"
+      - "npm test"
+      - "npm run typecheck"
+      - "npm run lint"
+      - "node --check public/admin/app.js"
+      - "git diff --check"
+      - "Inspect staged diff before commit"
+      - "git push origin main"
+      - "GoalBuddy state checker"
+    stop_if:
+      - "Need to stage or edit files outside allowed_files."
+      - "A staged diff contains secrets, local deployment credentials, raw device IDs, raw payloads, hostnames, usernames, SIDs, full local paths, object keys, HMAC material, summary_json, or live package names."
+      - "Verification fails twice for the same reason."
+      - "Remote push is rejected for non-fast-forward or auth reasons."
     receipt: null
 
 checks:

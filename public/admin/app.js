@@ -4,7 +4,11 @@ const packageViews = new Set(["package", "summary", "observations"]);
 const state = {
   selectedDeviceId: "",
   autoRefreshTimer: 0,
-  packageView: storedPackageView()
+  packageView: storedPackageView(),
+  devicePage: 1,
+  runPage: 1,
+  inventoryPage: 1,
+  detailInventoryPage: 1
 };
 
 const el = {
@@ -22,12 +26,16 @@ const el = {
   healthConfig: document.querySelector("#health-config"),
   healthBody: document.querySelector("#health-body"),
   devicesBody: document.querySelector("#devices-body"),
+  devicesPagination: document.querySelector("#devices-pagination"),
   packagesBody: document.querySelector("#packages-body"),
+  packagesPagination: document.querySelector("#packages-pagination"),
   runsBody: document.querySelector("#runs-body"),
+  runsPagination: document.querySelector("#runs-pagination"),
   detail: document.querySelector("#device-detail"),
   detailTitle: document.querySelector("#detail-title"),
   detailSummary: document.querySelector("#detail-summary"),
   detailPackagesBody: document.querySelector("#detail-packages-body"),
+  detailPackagesPagination: document.querySelector("#detail-packages-pagination"),
   detailRunsBody: document.querySelector("#detail-runs-body"),
   detailEventsBody: document.querySelector("#detail-events-body"),
   lifecycleReason: document.querySelector("#lifecycle-reason"),
@@ -139,10 +147,23 @@ function setSelectValue(select, value, fallback) {
   select.value = allowed ? value : fallback;
 }
 
+function pageFromParams(params, name) {
+  const page = Number.parseInt(params.get(name) || "1", 10);
+  return Number.isFinite(page) && page > 0 ? page : 1;
+}
+
+function offsetForPage(page, limit = 50) {
+  return (Math.max(1, page) - 1) * limit;
+}
+
 function applyUrlStateFromLocation() {
   const url = new URL(window.location.href);
   const params = url.searchParams;
   state.selectedDeviceId = deviceIdFromPath(url.pathname);
+  state.devicePage = pageFromParams(params, "device_page");
+  state.runPage = pageFromParams(params, "run_page");
+  state.inventoryPage = pageFromParams(params, "inventory_page");
+  state.detailInventoryPage = pageFromParams(params, "detail_inventory_page");
   setSelectValue(el.deviceStatus, params.get("device_status") || "active", "active");
   setSelectValue(el.runStatus, params.get("run_status") || "", "");
   el.runProfile.value = params.get("run_profile") || "";
@@ -159,18 +180,30 @@ function setParamIfValue(params, name, value, defaultValue = "") {
   }
 }
 
+function setPageParam(params, name, value) {
+  if (value > 1) {
+    params.set(name, String(value));
+  }
+}
+
 function currentAdminPath() {
   const url = new URL(window.location.href);
   url.pathname = state.selectedDeviceId ? `/admin/devices/${encodeURIComponent(state.selectedDeviceId)}` : "/admin/";
   url.search = "";
   const params = url.searchParams;
   setParamIfValue(params, "device_status", el.deviceStatus.value, "active");
+  setPageParam(params, "device_page", state.devicePage);
   params.set("inventory_view", state.packageView);
   setParamIfValue(params, "package_query", el.packageQuery.value.trim());
   setParamIfValue(params, "ecosystem", el.packageEcosystem.value.trim());
   setParamIfValue(params, "profile", el.packageProfile.value.trim());
+  setPageParam(params, "inventory_page", state.inventoryPage);
   setParamIfValue(params, "run_status", el.runStatus.value);
   setParamIfValue(params, "run_profile", el.runProfile.value.trim());
+  setPageParam(params, "run_page", state.runPage);
+  if (state.selectedDeviceId) {
+    setPageParam(params, "detail_inventory_page", state.detailInventoryPage);
+  }
   return `${url.pathname}${url.search}`;
 }
 
@@ -183,6 +216,46 @@ function syncUrlState(mode = "replace") {
   } else {
     window.history.replaceState({}, "", next);
   }
+}
+
+function paginationPages(page, pageCount) {
+  if (pageCount <= 0) return [];
+  const pages = new Set([1, pageCount]);
+  for (let candidate = page - 2; candidate <= page + 2; candidate++) {
+    if (candidate >= 1 && candidate <= pageCount) {
+      pages.add(candidate);
+    }
+  }
+  return [...pages].sort((left, right) => left - right);
+}
+
+function renderPagination(container, data, pageKey) {
+  if (!container) return;
+  const page = Number(data.page || state[pageKey] || 1);
+  const pageCount = Number(data.page_count || 0);
+  const total = Number(data.total || 0);
+  const pages = paginationPages(page, pageCount);
+  const pageButtons = pages.map((candidate, index) => {
+    const previous = pages[index - 1];
+    const gap = previous && candidate - previous > 1 ? '<span class="page-gap">...</span>' : "";
+    return `${gap}<button type="button" data-page="${candidate}" ${candidate === page ? 'aria-current="page"' : ""}>${candidate}</button>`;
+  }).join("");
+  container.innerHTML = `
+    <span>${formatNumber(total)} total</span>
+    <div class="page-buttons">
+      <button type="button" data-page="1" ${page <= 1 || pageCount <= 0 ? "disabled" : ""}>First</button>
+      <button type="button" data-page="${Math.max(1, page - 1)}" ${page <= 1 || pageCount <= 0 ? "disabled" : ""}>Prev</button>
+      ${pageButtons}
+      <button type="button" data-page="${Math.min(pageCount || 1, page + 1)}" ${!data.has_more ? "disabled" : ""}>Next</button>
+      <button type="button" data-page="${pageCount || 1}" ${!data.has_more ? "disabled" : ""}>Last</button>
+    </div>
+  `;
+}
+
+async function setPage(pageKey, page, loader) {
+  state[pageKey] = Math.max(1, Number(page) || 1);
+  syncUrlState("push");
+  await loader();
 }
 
 async function loadOverview() {
@@ -221,7 +294,9 @@ async function loadHealth() {
 
 async function loadDevices() {
   const status = encodeURIComponent(el.deviceStatus.value);
-  const data = await getJSON(`/v1/ui/admin/devices?status=${status}&limit=50&offset=0`);
+  const data = await getJSON(`/v1/ui/admin/devices?status=${status}&limit=50&offset=${offsetForPage(state.devicePage)}`);
+  state.devicePage = data.page || state.devicePage;
+  renderPagination(el.devicesPagination, data, "devicePage");
   if (data.devices.length === 0) {
     el.devicesBody.innerHTML = '<tr><td colspan="6">No devices found.</td></tr>';
     return;
@@ -239,11 +314,13 @@ async function loadDevices() {
 }
 
 async function loadRuns() {
-  const params = new URLSearchParams({ limit: "50", offset: "0" });
+  const params = new URLSearchParams({ limit: "50", offset: String(offsetForPage(state.runPage)) });
   if (state.selectedDeviceId) params.set("device_id", state.selectedDeviceId);
   if (el.runStatus.value) params.set("status", el.runStatus.value);
   if (el.runProfile.value.trim()) params.set("profile", el.runProfile.value.trim());
   const data = await getJSON(`/v1/ui/admin/runs?${params.toString()}`);
+  state.runPage = data.page || state.runPage;
+  renderPagination(el.runsPagination, data, "runPage");
   if (data.runs.length === 0) {
     el.runsBody.innerHTML = '<tr><td colspan="7">No runs found.</td></tr>';
     return;
@@ -315,13 +392,15 @@ function syncPackageViewControls() {
 }
 
 async function loadPackages() {
-  const params = new URLSearchParams({ limit: "50", offset: "0" });
+  const params = new URLSearchParams({ limit: "50", offset: String(offsetForPage(state.inventoryPage)) });
   params.set("view", state.packageView);
   if (state.selectedDeviceId) params.set("device_id", state.selectedDeviceId);
   if (el.packageQuery.value.trim()) params.set("query", el.packageQuery.value.trim());
   if (el.packageEcosystem.value.trim()) params.set("ecosystem", el.packageEcosystem.value.trim());
   if (el.packageProfile.value.trim()) params.set("profile", el.packageProfile.value.trim());
   const data = await getJSON(`/v1/ui/admin/packages?${params.toString()}`);
+  state.inventoryPage = data.page || state.inventoryPage;
+  renderPagination(el.packagesPagination, data, "inventoryPage");
   if (data.packages.length === 0) {
     el.packagesBody.innerHTML = '<tr><td colspan="8">No current packages found.</td></tr>';
     return;
@@ -363,21 +442,7 @@ async function loadDeviceDetail(deviceId) {
         <td>${escapeHtml(formatTime(event.created_at))}</td>
       </tr>
     `).join("");
-  const packageParams = new URLSearchParams({ limit: "50", offset: "0", view: state.packageView });
-  const packages = await getJSON(`/v1/ui/admin/devices/${encodeURIComponent(deviceId)}/packages?${packageParams.toString()}`);
-  el.detailPackagesBody.innerHTML = packages.packages.length === 0
-    ? '<tr><td colspan="7">No current packages.</td></tr>'
-    : packages.packages.map((pkg) => `
-      <tr>
-        <td>${packageName(pkg)}</td>
-        <td>${escapeHtml(pkg.ecosystem || "-")}</td>
-        <td>${packageVersionCell(pkg)}</td>
-        <td>${escapeHtml(pkg.profile || "-")}</td>
-        <td>${packageOccurrenceCount(pkg)}</td>
-        <td>${escapeHtml(packageSourceLabel(pkg))}</td>
-        <td>${escapeHtml(formatTime(packageObservedAt(pkg)))}</td>
-      </tr>
-    `).join("");
+  await loadDevicePackages(deviceId);
   el.detailRunsBody.innerHTML = data.recent_runs.length === 0
     ? '<tr><td colspan="6">No recent runs.</td></tr>'
     : data.recent_runs.map((run) => `
@@ -391,6 +456,31 @@ async function loadDeviceDetail(deviceId) {
       </tr>
   `).join("");
   await Promise.all([loadPackages(), loadRuns()]);
+}
+
+async function loadDevicePackages(deviceId = state.selectedDeviceId) {
+  if (!deviceId) return;
+  const packageParams = new URLSearchParams({
+    limit: "50",
+    offset: String(offsetForPage(state.detailInventoryPage)),
+    view: state.packageView
+  });
+  const packages = await getJSON(`/v1/ui/admin/devices/${encodeURIComponent(deviceId)}/packages?${packageParams.toString()}`);
+  state.detailInventoryPage = packages.page || state.detailInventoryPage;
+  renderPagination(el.detailPackagesPagination, packages, "detailInventoryPage");
+  el.detailPackagesBody.innerHTML = packages.packages.length === 0
+    ? '<tr><td colspan="7">No current packages.</td></tr>'
+    : packages.packages.map((pkg) => `
+      <tr>
+        <td>${packageName(pkg)}</td>
+        <td>${escapeHtml(pkg.ecosystem || "-")}</td>
+        <td>${packageVersionCell(pkg)}</td>
+        <td>${escapeHtml(pkg.profile || "-")}</td>
+        <td>${packageOccurrenceCount(pkg)}</td>
+        <td>${escapeHtml(packageSourceLabel(pkg))}</td>
+        <td>${escapeHtml(formatTime(packageObservedAt(pkg)))}</td>
+      </tr>
+    `).join("");
 }
 
 async function refreshAll() {
@@ -422,32 +512,41 @@ async function restoreFromLocation() {
 
 async function selectDevice(deviceId) {
   state.selectedDeviceId = deviceId;
+  state.runPage = 1;
+  state.inventoryPage = 1;
+  state.detailInventoryPage = 1;
   syncUrlState("push");
   await loadDeviceDetail(deviceId);
 }
 
 el.refresh.addEventListener("click", refreshAll);
 el.deviceStatus.addEventListener("change", () => {
+  state.devicePage = 1;
   syncUrlState("replace");
   refreshAll();
 });
 el.runStatus.addEventListener("change", () => {
+  state.runPage = 1;
   syncUrlState("replace");
   loadRuns();
 });
 el.runProfile.addEventListener("change", () => {
+  state.runPage = 1;
   syncUrlState("replace");
   loadRuns();
 });
 el.packageQuery.addEventListener("input", () => {
+  state.inventoryPage = 1;
   syncUrlState("replace");
   loadPackages();
 });
 el.packageEcosystem.addEventListener("change", () => {
+  state.inventoryPage = 1;
   syncUrlState("replace");
   loadPackages();
 });
 el.packageProfile.addEventListener("change", () => {
+  state.inventoryPage = 1;
   syncUrlState("replace");
   loadPackages();
 });
@@ -460,6 +559,8 @@ el.packageView.forEach((input) => {
     } catch {
       // Browser storage can be unavailable in restricted contexts.
     }
+    state.inventoryPage = 1;
+    state.detailInventoryPage = 1;
     syncUrlState("replace");
     if (state.selectedDeviceId && !el.detail.hidden) {
       loadDeviceDetail(state.selectedDeviceId);
@@ -470,6 +571,9 @@ el.packageView.forEach((input) => {
 });
 el.clearDevice.addEventListener("click", () => {
   state.selectedDeviceId = "";
+  state.runPage = 1;
+  state.inventoryPage = 1;
+  state.detailInventoryPage = 1;
   el.detail.hidden = true;
   syncUrlState("push");
   loadPackages();
@@ -490,6 +594,22 @@ el.packagesBody.addEventListener("click", (event) => {
   const row = event.target.closest("tr[data-device-id]");
   if (row) selectDevice(row.dataset.deviceId);
 });
+el.devicesPagination.addEventListener("click", (event) => {
+  const button = event.target.closest("button[data-page]");
+  if (button) setPage("devicePage", button.dataset.page, loadDevices);
+});
+el.packagesPagination.addEventListener("click", (event) => {
+  const button = event.target.closest("button[data-page]");
+  if (button) setPage("inventoryPage", button.dataset.page, loadPackages);
+});
+el.runsPagination.addEventListener("click", (event) => {
+  const button = event.target.closest("button[data-page]");
+  if (button) setPage("runPage", button.dataset.page, loadRuns);
+});
+el.detailPackagesPagination.addEventListener("click", (event) => {
+  const button = event.target.closest("button[data-page]");
+  if (button) setPage("detailInventoryPage", button.dataset.page, () => loadDevicePackages());
+});
 el.autoRefresh.addEventListener("change", () => {
   if (state.autoRefreshTimer) clearInterval(state.autoRefreshTimer);
   state.autoRefreshTimer = el.autoRefresh.checked ? setInterval(refreshAll, 30000) : 0;
@@ -505,6 +625,7 @@ if (globalThis.__hiveAdminTesting) {
     deviceIdFromPath,
     restoreFromLocation,
     selectDevice,
+    setPage,
     syncUrlState
   };
 }

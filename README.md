@@ -46,8 +46,9 @@ against `/v1/admin/*`.
 Device detail views are recoverable at `/admin/devices/<device-id>`. The UI
 also preserves key filters in query parameters such as `device_status`,
 `inventory_view`, `package_query`, `ecosystem`, `profile`, `run_status`, and
-`run_profile`. Auto-refresh remains local browser state and is not encoded in
-the URL.
+`run_profile`. Numbered table pages are recoverable through `device_page`,
+`inventory_page`, `run_page`, and `detail_inventory_page`. Auto-refresh remains
+local browser state and is not encoded in the URL.
 
 Configure these Worker values before using the UI:
 
@@ -274,6 +275,9 @@ Supported endpoints:
 - `GET /v1/admin/packages?query=<name>&ecosystem=npm&profile=baseline&view=package|summary|observations&limit=50&offset=0`
 - `GET /v1/admin/devices/<device-id>/packages?profile=baseline&view=package|summary|observations&limit=50&offset=0`
 
+List endpoints return additive pagination metadata alongside existing arrays:
+`limit`, `offset`, `total`, `page`, `page_count`, and `has_more`.
+
 Example overview:
 
 ```powershell
@@ -326,6 +330,10 @@ Example response:
   ],
   "limit": 50,
   "offset": 0,
+  "total": 11,
+  "page": 1,
+  "page_count": 1,
+  "has_more": false,
   "status": "active"
 }
 ```
@@ -355,7 +363,11 @@ Example response:
     }
   ],
   "limit": 50,
-  "offset": 0
+  "offset": 0,
+  "total": 32,
+  "page": 1,
+  "page_count": 1,
+  "has_more": false
 }
 ```
 
@@ -388,6 +400,10 @@ summary.
 The admin UI explicitly defaults to the package-family view and stores the
 operator's selected grouping mode in browser local storage. The API default
 stays `view=summary` for compatibility with script callers.
+The UI shows exact numbered pagination for devices, runs, global inventory, and
+selected-device package inventory. Page changes update the URL with
+recoverable page parameters while filter changes reset the affected table to
+page one.
 
 Package responses include controlled fields such as ecosystem, package name,
 normalized name, version, source type, package manager, profile, device ID, run
