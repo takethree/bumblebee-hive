@@ -48,9 +48,10 @@ also preserves key filters in query parameters such as `device_status`,
 `inventory_view`, `package_query`, `ecosystem`, `profile`, `run_status`, and
 `run_profile`. Numbered table pages are recoverable through `device_page`,
 `inventory_page`, `run_page`, and `detail_inventory_page`. The UI defaults to
-10 rows per page and lets operators choose 10, 25, 50, or 100 rows; non-default
-choices are recoverable through `page_size`. Auto-refresh remains local browser
-state and is not encoded in the URL.
+10 rows per page and lets operators choose 10, 25, 50, or 100 rows next to each
+paginated list. Non-default choices are recoverable through `device_page_size`,
+`inventory_page_size`, `run_page_size`, and `detail_inventory_page_size`.
+Auto-refresh remains local browser state and is not encoded in the URL.
 
 Configure these Worker values before using the UI:
 
@@ -404,9 +405,9 @@ operator's selected grouping mode in browser local storage. The API default
 stays `view=summary` for compatibility with script callers.
 The UI shows exact numbered pagination for devices, runs, global inventory, and
 selected-device package inventory. Page changes update the URL with
-recoverable page parameters while filter and page-size changes reset the
-affected table to page one. The browser UI defaults to 10 rows per page; script
-callers can continue to pass explicit `limit` and `offset` values.
+recoverable page parameters while filter and per-list page-size changes reset
+the affected table to page one. The browser UI defaults to 10 rows per page;
+script callers can continue to pass explicit `limit` and `offset` values.
 
 Package responses include controlled fields such as ecosystem, package name,
 normalized name, version, source type, package manager, profile, device ID, run

@@ -57,8 +57,10 @@ function makeHarness(initialURL: string): {
   element("device-status").options = [{ value: "active" }, { value: "disabled" }, { value: "all" }];
   element("run-status").value = "";
   element("run-status").options = [{ value: "" }, { value: "complete" }, { value: "partial" }, { value: "error" }];
-  element("page-size").value = "10";
-  element("page-size").options = [{ value: "10" }, { value: "25" }, { value: "50" }, { value: "100" }];
+  for (const id of ["device-page-size", "run-page-size", "inventory-page-size", "detail-inventory-page-size"]) {
+    element(id).value = "10";
+    element(id).options = [{ value: "10" }, { value: "25" }, { value: "50" }, { value: "100" }];
+  }
   const packageViewInputs = ["package", "summary", "observations"].map((value) => {
     const input = new FakeElement(`package-view-${value}`);
     input.value = value;
@@ -84,6 +86,11 @@ function makeHarness(initialURL: string): {
     fetch: async (path: string) => {
       fetchLog.push(path);
       const pathname = String(path);
+      const requestURL = new URL(pathname, "https://hive.example.test");
+      const limit = Number.parseInt(requestURL.searchParams.get("limit") || "10", 10);
+      const offset = Number.parseInt(requestURL.searchParams.get("offset") || "0", 10);
+      const page = Math.floor(offset / limit) + 1;
+      const pageMeta = { limit, offset, total: 100, page, page_count: Math.ceil(100 / limit), has_more: offset + limit < 100 };
       return {
         ok: true,
         json: async () => {
@@ -94,17 +101,17 @@ function makeHarness(initialURL: string): {
             return { counts: { healthy: 0, stale: 0, attention: 0, unknown: 0 }, config: { profile: "baseline", expected_cadence_hours: 6, stale_hours: 24, weekend_grace_hours: 48 }, devices: [] };
           }
           if (pathname.includes("/runs")) {
-            return { runs: [], limit: 50, offset: 0, total: 0, page: 1, page_count: 0, has_more: false };
+            return { runs: [], ...pageMeta };
           }
           if (pathname.includes("/packages")) {
-            return { packages: [], limit: 50, offset: 0, total: 0, page: 1, page_count: 0, has_more: false };
+            return { packages: [], ...pageMeta };
           }
           if (pathname.match(/\/devices\/[^/]+$/)) {
             const deviceID = decodeURIComponent(pathname.split("/").at(-1) || "");
             return { device: { device_id: deviceID, status: "active", run_count: 1, batch_count: 1, record_count: 1 }, lifecycle_events: [], recent_runs: [] };
           }
           if (pathname.includes("/devices")) {
-            return { devices: [], limit: 50, offset: 0, total: 0, page: 1, page_count: 0, has_more: false };
+            return { devices: [], ...pageMeta };
           }
           return {};
         }
@@ -191,11 +198,14 @@ describe("admin URL state", () => {
     const harness = makeHarness("https://hive.example.test/admin/devices/device-1?page_size=25&inventory_view=package&device_page=2&inventory_page=3&run_page=4&detail_inventory_page=5");
     const admin = await loadAdminApp(harness);
 
-    expect(harness.elements.get("page-size")?.value).toBe("25");
-    expect(admin.currentAdminPath()).toBe("/admin/devices/device-1?page_size=25&device_page=2&inventory_view=package&inventory_page=3&run_page=4&detail_inventory_page=5");
+    expect(harness.elements.get("device-page-size")?.value).toBe("25");
+    expect(harness.elements.get("run-page-size")?.value).toBe("25");
+    expect(harness.elements.get("inventory-page-size")?.value).toBe("25");
+    expect(harness.elements.get("detail-inventory-page-size")?.value).toBe("25");
+    expect(admin.currentAdminPath()).toBe("/admin/devices/device-1?device_page_size=25&device_page=2&inventory_view=package&inventory_page_size=25&inventory_page=3&run_page_size=25&run_page=4&detail_inventory_page_size=25&detail_inventory_page=5");
 
     await admin.setPage("inventoryPage", 6, async () => undefined);
-    expect(harness.pushes.at(-1)).toBe("/admin/devices/device-1?page_size=25&device_page=2&inventory_view=package&inventory_page=6&run_page=4&detail_inventory_page=5");
+    expect(harness.pushes.at(-1)).toBe("/admin/devices/device-1?device_page_size=25&device_page=2&inventory_view=package&inventory_page_size=25&inventory_page=6&run_page_size=25&run_page=4&detail_inventory_page_size=25&detail_inventory_page=5");
   });
 
   it("resets relevant page state when filters change", async () => {
@@ -211,17 +221,19 @@ describe("admin URL state", () => {
     expect(admin.currentAdminPath()).toBe("/admin/?device_page=2&inventory_view=summary&package_query=needle&run_status=complete");
   });
 
-  it("defaults to ten rows and resets page state when page size changes", async () => {
+  it("defaults to ten rows and resets only the target list when page size changes", async () => {
     const harness = makeHarness("https://hive.example.test/admin/?inventory_view=package&device_page=3&inventory_page=4&run_page=5");
     const admin = await loadAdminApp(harness);
 
     expect(admin.currentAdminPath()).toBe("/admin/?device_page=3&inventory_view=package&inventory_page=4&run_page=5");
 
-    harness.elements.get("page-size")!.value = "50";
-    await harness.elements.get("page-size")!.listeners.get("change")?.({} as Event);
+    harness.elements.get("inventory-page-size")!.value = "50";
+    await harness.elements.get("inventory-page-size")!.listeners.get("change")?.({} as Event);
 
-    expect(admin.currentAdminPath()).toBe("/admin/?page_size=50&inventory_view=package");
-    expect(harness.replaces.at(-1)).toBe("/admin/?page_size=50&inventory_view=package");
-    expect((admin as unknown as { state: { pageSize: number } }).state.pageSize).toBe(50);
+    expect(admin.currentAdminPath()).toBe("/admin/?device_page=3&inventory_view=package&inventory_page_size=50&run_page=5");
+    expect(harness.replaces.at(-1)).toBe("/admin/?device_page=3&inventory_view=package&inventory_page_size=50&run_page=5");
+    expect((admin as unknown as { state: { inventoryPageSize: number; inventoryPage: number; runPage: number } }).state.inventoryPageSize).toBe(50);
+    expect((admin as unknown as { state: { inventoryPageSize: number; inventoryPage: number; runPage: number } }).state.inventoryPage).toBe(1);
+    expect((admin as unknown as { state: { inventoryPageSize: number; inventoryPage: number; runPage: number } }).state.runPage).toBe(5);
   });
 });

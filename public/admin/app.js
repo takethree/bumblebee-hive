@@ -1,13 +1,21 @@
 const packageViewStorageKey = "hive.inventory.view";
-const pageSizeStorageKey = "hive.page.size";
 const packageViews = new Set(["package", "summary", "observations"]);
 const pageSizes = new Set([10, 25, 50, 100]);
+const pageSizeStorageKeys = {
+  devicePageSize: "hive.devices.page.size",
+  runPageSize: "hive.runs.page.size",
+  inventoryPageSize: "hive.inventory.page.size",
+  detailInventoryPageSize: "hive.detail.inventory.page.size"
+};
 
 const state = {
   selectedDeviceId: "",
   autoRefreshTimer: 0,
   packageView: storedPackageView(),
-  pageSize: storedPageSize(),
+  devicePageSize: storedPageSize("devicePageSize"),
+  runPageSize: storedPageSize("runPageSize"),
+  inventoryPageSize: storedPageSize("inventoryPageSize"),
+  detailInventoryPageSize: storedPageSize("detailInventoryPageSize"),
   devicePage: 1,
   runPage: 1,
   inventoryPage: 1,
@@ -19,13 +27,15 @@ const el = {
   autoRefresh: document.querySelector("#auto-refresh"),
   lastRefresh: document.querySelector("#last-refresh"),
   error: document.querySelector("#error"),
-  pageSize: document.querySelector("#page-size"),
+  devicePageSize: document.querySelector("#device-page-size"),
   deviceStatus: document.querySelector("#device-status"),
   runStatus: document.querySelector("#run-status"),
   runProfile: document.querySelector("#run-profile"),
+  runPageSize: document.querySelector("#run-page-size"),
   packageQuery: document.querySelector("#package-query"),
   packageEcosystem: document.querySelector("#package-ecosystem"),
   packageProfile: document.querySelector("#package-profile"),
+  inventoryPageSize: document.querySelector("#inventory-page-size"),
   packageView: document.querySelectorAll('input[name="package-view"]'),
   healthConfig: document.querySelector("#health-config"),
   healthBody: document.querySelector("#health-body"),
@@ -40,6 +50,7 @@ const el = {
   detailSummary: document.querySelector("#detail-summary"),
   detailPackagesBody: document.querySelector("#detail-packages-body"),
   detailPackagesPagination: document.querySelector("#detail-packages-pagination"),
+  detailInventoryPageSize: document.querySelector("#detail-inventory-page-size"),
   detailRunsBody: document.querySelector("#detail-runs-body"),
   detailEventsBody: document.querySelector("#detail-events-body"),
   lifecycleReason: document.querySelector("#lifecycle-reason"),
@@ -62,12 +73,19 @@ function pageSizeFromValue(value, fallback = 10) {
   return pageSizes.has(size) ? size : fallback;
 }
 
-function storedPageSize() {
+function storedPageSize(stateKey) {
   try {
-    return pageSizeFromValue(localStorage.getItem(pageSizeStorageKey), 10);
+    return pageSizeFromValue(localStorage.getItem(pageSizeStorageKeys[stateKey]), 10);
   } catch {
     return 10;
   }
+}
+
+function syncPageSizeControls() {
+  el.devicePageSize.value = String(state.devicePageSize);
+  el.runPageSize.value = String(state.runPageSize);
+  el.inventoryPageSize.value = String(state.inventoryPageSize);
+  el.detailInventoryPageSize.value = String(state.detailInventoryPageSize);
 }
 
 function text(id, value) {
@@ -169,7 +187,7 @@ function pageFromParams(params, name) {
   return Number.isFinite(page) && page > 0 ? page : 1;
 }
 
-function offsetForPage(page, limit = state.pageSize) {
+function offsetForPage(page, limit) {
   return (Math.max(1, page) - 1) * limit;
 }
 
@@ -184,8 +202,11 @@ function applyUrlStateFromLocation() {
   const url = new URL(window.location.href);
   const params = url.searchParams;
   state.selectedDeviceId = deviceIdFromPath(url.pathname);
-  state.pageSize = pageSizeFromValue(params.get("page_size"), storedPageSize());
-  el.pageSize.value = String(state.pageSize);
+  state.devicePageSize = pageSizeFromValue(params.get("device_page_size") || params.get("page_size"), storedPageSize("devicePageSize"));
+  state.runPageSize = pageSizeFromValue(params.get("run_page_size") || params.get("page_size"), storedPageSize("runPageSize"));
+  state.inventoryPageSize = pageSizeFromValue(params.get("inventory_page_size") || params.get("page_size"), storedPageSize("inventoryPageSize"));
+  state.detailInventoryPageSize = pageSizeFromValue(params.get("detail_inventory_page_size") || params.get("page_size"), storedPageSize("detailInventoryPageSize"));
+  syncPageSizeControls();
   state.devicePage = pageFromParams(params, "device_page");
   state.runPage = pageFromParams(params, "run_page");
   state.inventoryPage = pageFromParams(params, "inventory_page");
@@ -212,25 +233,32 @@ function setPageParam(params, name, value) {
   }
 }
 
+function setPageSizeParam(params, name, value) {
+  if (value !== 10) {
+    params.set(name, String(value));
+  }
+}
+
 function currentAdminPath() {
   const url = new URL(window.location.href);
   url.pathname = state.selectedDeviceId ? `/admin/devices/${encodeURIComponent(state.selectedDeviceId)}` : "/admin/";
   url.search = "";
   const params = url.searchParams;
-  if (state.pageSize !== 10) {
-    params.set("page_size", String(state.pageSize));
-  }
+  setPageSizeParam(params, "device_page_size", state.devicePageSize);
   setParamIfValue(params, "device_status", el.deviceStatus.value, "active");
   setPageParam(params, "device_page", state.devicePage);
   params.set("inventory_view", state.packageView);
   setParamIfValue(params, "package_query", el.packageQuery.value.trim());
   setParamIfValue(params, "ecosystem", el.packageEcosystem.value.trim());
   setParamIfValue(params, "profile", el.packageProfile.value.trim());
+  setPageSizeParam(params, "inventory_page_size", state.inventoryPageSize);
   setPageParam(params, "inventory_page", state.inventoryPage);
   setParamIfValue(params, "run_status", el.runStatus.value);
   setParamIfValue(params, "run_profile", el.runProfile.value.trim());
+  setPageSizeParam(params, "run_page_size", state.runPageSize);
   setPageParam(params, "run_page", state.runPage);
   if (state.selectedDeviceId) {
+    setPageSizeParam(params, "detail_inventory_page_size", state.detailInventoryPageSize);
     setPageParam(params, "detail_inventory_page", state.detailInventoryPage);
   }
   return `${url.pathname}${url.search}`;
@@ -287,6 +315,19 @@ async function setPage(pageKey, page, loader) {
   await loader();
 }
 
+async function setPageSize(stateKey, pageKey, select, loader) {
+  state[stateKey] = pageSizeFromValue(select.value, 10);
+  select.value = String(state[stateKey]);
+  try {
+    localStorage.setItem(pageSizeStorageKeys[stateKey], String(state[stateKey]));
+  } catch {
+    // Browser storage can be unavailable in restricted contexts.
+  }
+  state[pageKey] = 1;
+  syncUrlState("replace");
+  await loader();
+}
+
 async function loadOverview() {
   const overview = await getJSON("/v1/ui/admin/overview");
   text("#metric-devices", formatNumber(overview.devices.total));
@@ -323,7 +364,7 @@ async function loadHealth() {
 
 async function loadDevices() {
   const status = encodeURIComponent(el.deviceStatus.value);
-  const data = await getJSON(`/v1/ui/admin/devices?status=${status}&limit=${state.pageSize}&offset=${offsetForPage(state.devicePage)}`);
+  const data = await getJSON(`/v1/ui/admin/devices?status=${status}&limit=${state.devicePageSize}&offset=${offsetForPage(state.devicePage, state.devicePageSize)}`);
   state.devicePage = data.page || state.devicePage;
   renderPagination(el.devicesPagination, data, "devicePage");
   if (data.devices.length === 0) {
@@ -343,7 +384,7 @@ async function loadDevices() {
 }
 
 async function loadRuns() {
-  const params = new URLSearchParams({ limit: String(state.pageSize), offset: String(offsetForPage(state.runPage)) });
+  const params = new URLSearchParams({ limit: String(state.runPageSize), offset: String(offsetForPage(state.runPage, state.runPageSize)) });
   if (state.selectedDeviceId) params.set("device_id", state.selectedDeviceId);
   if (el.runStatus.value) params.set("status", el.runStatus.value);
   if (el.runProfile.value.trim()) params.set("profile", el.runProfile.value.trim());
@@ -421,7 +462,7 @@ function syncPackageViewControls() {
 }
 
 async function loadPackages() {
-  const params = new URLSearchParams({ limit: String(state.pageSize), offset: String(offsetForPage(state.inventoryPage)) });
+  const params = new URLSearchParams({ limit: String(state.inventoryPageSize), offset: String(offsetForPage(state.inventoryPage, state.inventoryPageSize)) });
   params.set("view", state.packageView);
   if (state.selectedDeviceId) params.set("device_id", state.selectedDeviceId);
   if (el.packageQuery.value.trim()) params.set("query", el.packageQuery.value.trim());
@@ -490,8 +531,8 @@ async function loadDeviceDetail(deviceId) {
 async function loadDevicePackages(deviceId = state.selectedDeviceId) {
   if (!deviceId) return;
   const packageParams = new URLSearchParams({
-    limit: String(state.pageSize),
-    offset: String(offsetForPage(state.detailInventoryPage)),
+    limit: String(state.detailInventoryPageSize),
+    offset: String(offsetForPage(state.detailInventoryPage, state.detailInventoryPageSize)),
     view: state.packageView
   });
   const packages = await getJSON(`/v1/ui/admin/devices/${encodeURIComponent(deviceId)}/packages?${packageParams.toString()}`);
@@ -548,26 +589,13 @@ async function selectDevice(deviceId) {
 }
 
 el.refresh.addEventListener("click", refreshAll);
-el.pageSize.addEventListener("change", async () => {
-  state.pageSize = pageSizeFromValue(el.pageSize.value, 10);
-  el.pageSize.value = String(state.pageSize);
-  try {
-    localStorage.setItem(pageSizeStorageKey, String(state.pageSize));
-  } catch {
-    // Browser storage can be unavailable in restricted contexts.
-  }
-  resetPages();
-  syncUrlState("replace");
-  await refreshAll();
-  if (state.selectedDeviceId && !el.detail.hidden) {
-    await loadDeviceDetail(state.selectedDeviceId);
-  }
-});
+el.devicePageSize.addEventListener("change", () => setPageSize("devicePageSize", "devicePage", el.devicePageSize, loadDevices));
 el.deviceStatus.addEventListener("change", () => {
   state.devicePage = 1;
   syncUrlState("replace");
   refreshAll();
 });
+el.runPageSize.addEventListener("change", () => setPageSize("runPageSize", "runPage", el.runPageSize, loadRuns));
 el.runStatus.addEventListener("change", () => {
   state.runPage = 1;
   syncUrlState("replace");
@@ -578,6 +606,7 @@ el.runProfile.addEventListener("change", () => {
   syncUrlState("replace");
   loadRuns();
 });
+el.inventoryPageSize.addEventListener("change", () => setPageSize("inventoryPageSize", "inventoryPage", el.inventoryPageSize, loadPackages));
 el.packageQuery.addEventListener("input", () => {
   state.inventoryPage = 1;
   syncUrlState("replace");
@@ -617,9 +646,10 @@ el.clearDevice.addEventListener("click", () => {
   resetPages();
   el.detail.hidden = true;
   syncUrlState("push");
-  loadPackages();
-  loadRuns();
+    loadPackages();
+    loadRuns();
 });
+el.detailInventoryPageSize.addEventListener("change", () => setPageSize("detailInventoryPageSize", "detailInventoryPage", el.detailInventoryPageSize, () => loadDevicePackages()));
 el.disableDevice.addEventListener("click", () => lifecycleAction("disable"));
 el.enableDevice.addEventListener("click", () => lifecycleAction("enable"));
 el.devicesBody.addEventListener("click", (event) => {
@@ -667,6 +697,7 @@ if (globalThis.__hiveAdminTesting) {
     restoreFromLocation,
     selectDevice,
     setPage,
+    setPageSize,
     state,
     syncUrlState
   };
