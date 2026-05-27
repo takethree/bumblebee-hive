@@ -26,6 +26,11 @@ interface DeviceRow {
   hmac_key_nonce: string;
 }
 
+interface ValidatedRecords {
+  runID: string;
+  summary: InventoryRecord | null;
+}
+
 const signatureHeader = "X-Inventory-Signature";
 const timestampHeader = "X-Inventory-Timestamp";
 const deviceHeader = "X-Inventory-Device-Id";
@@ -113,8 +118,8 @@ async function ingest(request: Request, env: Env): Promise<Response> {
   }
 
   const records = parseNDJSON(ndjson);
-  const summary = validateRecords(records, deviceID);
-  const runID = summary.run_id || "";
+  const validated = validateRecords(records, deviceID);
+  const { runID, summary } = validated;
   const batchID = await sha256Hex(rawBody);
   const receivedAt = new Date().toISOString();
   const objectKey = `${deviceID}/${runID}/${batchID}.ndjson${encoding ? ".gz" : ""}`;
@@ -131,17 +136,19 @@ async function ingest(request: Request, env: Env): Promise<Response> {
 
   await env.DB.prepare(
     "INSERT INTO batches (batch_id, device_id, run_id, received_at, content_encoding, object_key, body_sha256, record_count, summary_status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
-  ).bind(batchID, deviceID, runID, receivedAt, encoding || null, objectKey, batchID, records.length, summary.status || null).run();
+  ).bind(batchID, deviceID, runID, receivedAt, encoding || null, objectKey, batchID, records.length, summary?.status || null).run();
 
-  await env.DB.prepare(
-    "INSERT OR REPLACE INTO runs (device_id, profile, run_id, status, scanner_version, received_at, summary_json) VALUES (?, ?, ?, ?, ?, ?, ?)"
-  ).bind(deviceID, summary.profile || "", runID, summary.status || "", summary.scanner_version || null, receivedAt, JSON.stringify(summary)).run();
+  if (summary) {
+    await env.DB.prepare(
+      "INSERT OR REPLACE INTO runs (device_id, profile, run_id, status, scanner_version, received_at, summary_json) VALUES (?, ?, ?, ?, ?, ?, ?)"
+    ).bind(deviceID, summary.profile || "", runID, summary.status || "", summary.scanner_version || null, receivedAt, JSON.stringify(summary)).run();
+  }
 
   if (env.NORMALIZE_QUEUE) {
     await env.NORMALIZE_QUEUE.send({ device_id: deviceID, run_id: runID, batch_id: batchID });
   }
 
-  return json({ ok: true, batch_id: batchID, run_id: runID, records: records.length });
+  return json({ ok: true, batch_id: batchID, run_id: runID, records: records.length, run_complete: summary !== null });
 }
 
 function requireAccess(request: Request, env: Env): void {
@@ -215,7 +222,7 @@ function parseNDJSON(text: string): InventoryRecord[] {
   });
 }
 
-function validateRecords(records: InventoryRecord[], deviceID: string): InventoryRecord {
+function validateRecords(records: InventoryRecord[], deviceID: string): ValidatedRecords {
   let summary: InventoryRecord | null = null;
   let runID = "";
   for (const record of records) {
@@ -239,10 +246,7 @@ function validateRecords(records: InventoryRecord[], deviceID: string): Inventor
       summary = record;
     }
   }
-  if (!summary) {
-    throw new HttpError(400, "missing_scan_summary");
-  }
-  return summary;
+  return { runID, summary };
 }
 
 async function gunzipToText(bytes: Uint8Array): Promise<string> {

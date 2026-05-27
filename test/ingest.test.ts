@@ -147,6 +147,24 @@ describe("bumblebee hive worker", () => {
     expect(env.NORMALIZE_QUEUE.messages).toHaveLength(1);
   });
 
+  it("accepts partial batches before the final scan summary", async () => {
+    const env = makeEnv();
+    const hmacKey = "device-secret";
+    await addDevice(env, "device-1", hmacKey);
+    const ndjson = JSON.stringify({ record_type: "package", run_id: "run-1", endpoint: { device_id: "device-1" } }) + "\n";
+    const request = await signedRequest(env, gzipSync(ndjson), hmacKey);
+
+    const response = await worker.fetch(request, env);
+    const body = await response.json() as { run_complete: boolean };
+
+    expect(response.status).toBe(200);
+    expect(body.run_complete).toBe(false);
+    expect(env.RAW_BATCHES.objects.size).toBe(1);
+    expect(env.DB.batches).toHaveLength(1);
+    expect(env.DB.runs).toHaveLength(0);
+    expect(env.NORMALIZE_QUEUE.messages).toHaveLength(1);
+  });
+
   it("rejects invalid Access headers before ingest", async () => {
     const env = makeEnv();
     const hmacKey = "device-secret";
@@ -186,15 +204,19 @@ describe("bumblebee hive worker", () => {
     expect(response.status).toBe(401);
   });
 
-  it("rejects missing scan summaries", async () => {
+  it("accepts summary-only completion batches", async () => {
     const env = makeEnv();
     const hmacKey = "device-secret";
     await addDevice(env, "device-1", hmacKey);
-    const ndjson = JSON.stringify({ record_type: "package", run_id: "run-1", endpoint: { device_id: "device-1" } }) + "\n";
+    const ndjson = JSON.stringify({ record_type: "scan_summary", run_id: "run-1", status: "complete", endpoint: { device_id: "device-1" } }) + "\n";
     const request = await signedRequest(env, gzipSync(ndjson), hmacKey);
 
     const response = await worker.fetch(request, env);
+    const body = await response.json() as { run_complete: boolean };
 
-    expect(response.status).toBe(400);
+    expect(response.status).toBe(200);
+    expect(body.run_complete).toBe(true);
+    expect(env.DB.batches).toHaveLength(1);
+    expect(env.DB.runs).toHaveLength(1);
   });
 });

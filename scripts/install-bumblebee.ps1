@@ -1,7 +1,7 @@
 [CmdletBinding(SupportsShouldProcess = $true)]
 param(
   [string]$HiveBaseUrl = "https://hive.example.com",
-  [string]$BumblebeeVersion = "v0.1.1",
+  [string]$BumblebeeVersion = "v0.1.2",
   [string]$ReleaseBaseUrl,
   [string]$InstallRoot = "$env:ProgramFiles\Bumblebee",
   [string]$ConfigRoot = "$env:ProgramData\Bumblebee",
@@ -55,9 +55,11 @@ function Get-ReleaseAsset {
     [string]$WorkDir
   )
 
-  $assetName = "bumblebee_${Version}_windows_amd64.zip"
-  $zipUrl = "$BaseUrl/$Version/$assetName"
-  $checksumsUrl = "$BaseUrl/$Version/checksums.txt"
+  $tagName = if ($Version.StartsWith("v")) { $Version } else { "v$Version" }
+  $assetVersion = $Version -replace "^v", ""
+  $assetName = "bumblebee_${assetVersion}_windows_amd64.zip"
+  $zipUrl = "$BaseUrl/$tagName/$assetName"
+  $checksumsUrl = "$BaseUrl/$tagName/checksums.txt"
   $zipPath = Join-Path $WorkDir $assetName
   $checksumsPath = Join-Path $WorkDir "checksums.txt"
 
