@@ -57,6 +57,8 @@ function makeHarness(initialURL: string): {
   element("device-status").options = [{ value: "active" }, { value: "disabled" }, { value: "all" }];
   element("run-status").value = "";
   element("run-status").options = [{ value: "" }, { value: "complete" }, { value: "partial" }, { value: "error" }];
+  element("page-size").value = "10";
+  element("page-size").options = [{ value: "10" }, { value: "25" }, { value: "50" }, { value: "100" }];
   const packageViewInputs = ["package", "summary", "observations"].map((value) => {
     const input = new FakeElement(`package-view-${value}`);
     input.value = value;
@@ -186,13 +188,14 @@ describe("admin URL state", () => {
   });
 
   it("hydrates pagination params and pushes page changes into the URL", async () => {
-    const harness = makeHarness("https://hive.example.test/admin/devices/device-1?inventory_view=package&device_page=2&inventory_page=3&run_page=4&detail_inventory_page=5");
+    const harness = makeHarness("https://hive.example.test/admin/devices/device-1?page_size=25&inventory_view=package&device_page=2&inventory_page=3&run_page=4&detail_inventory_page=5");
     const admin = await loadAdminApp(harness);
 
-    expect(admin.currentAdminPath()).toBe("/admin/devices/device-1?device_page=2&inventory_view=package&inventory_page=3&run_page=4&detail_inventory_page=5");
+    expect(harness.elements.get("page-size")?.value).toBe("25");
+    expect(admin.currentAdminPath()).toBe("/admin/devices/device-1?page_size=25&device_page=2&inventory_view=package&inventory_page=3&run_page=4&detail_inventory_page=5");
 
     await admin.setPage("inventoryPage", 6, async () => undefined);
-    expect(harness.pushes.at(-1)).toBe("/admin/devices/device-1?device_page=2&inventory_view=package&inventory_page=6&run_page=4&detail_inventory_page=5");
+    expect(harness.pushes.at(-1)).toBe("/admin/devices/device-1?page_size=25&device_page=2&inventory_view=package&inventory_page=6&run_page=4&detail_inventory_page=5");
   });
 
   it("resets relevant page state when filters change", async () => {
@@ -206,5 +209,19 @@ describe("admin URL state", () => {
     harness.elements.get("run-status")!.value = "complete";
     harness.elements.get("run-status")!.listeners.get("change")?.({} as Event);
     expect(admin.currentAdminPath()).toBe("/admin/?device_page=2&inventory_view=summary&package_query=needle&run_status=complete");
+  });
+
+  it("defaults to ten rows and resets page state when page size changes", async () => {
+    const harness = makeHarness("https://hive.example.test/admin/?inventory_view=package&device_page=3&inventory_page=4&run_page=5");
+    const admin = await loadAdminApp(harness);
+
+    expect(admin.currentAdminPath()).toBe("/admin/?device_page=3&inventory_view=package&inventory_page=4&run_page=5");
+
+    harness.elements.get("page-size")!.value = "50";
+    await harness.elements.get("page-size")!.listeners.get("change")?.({} as Event);
+
+    expect(admin.currentAdminPath()).toBe("/admin/?page_size=50&inventory_view=package");
+    expect(harness.replaces.at(-1)).toBe("/admin/?page_size=50&inventory_view=package");
+    expect((admin as unknown as { state: { pageSize: number } }).state.pageSize).toBe(50);
   });
 });

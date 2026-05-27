@@ -60,6 +60,14 @@ h2 {
   gap: 12px;
 }
 
+.topbar label {
+  color: #e5e7eb;
+}
+
+.topbar select {
+  min-width: 86px;
+}
+
 main {
   margin: 0 auto;
   max-width: 1280px;

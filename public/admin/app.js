@@ -1,10 +1,13 @@
 const packageViewStorageKey = "hive.inventory.view";
+const pageSizeStorageKey = "hive.page.size";
 const packageViews = new Set(["package", "summary", "observations"]);
+const pageSizes = new Set([10, 25, 50, 100]);
 
 const state = {
   selectedDeviceId: "",
   autoRefreshTimer: 0,
   packageView: storedPackageView(),
+  pageSize: storedPageSize(),
   devicePage: 1,
   runPage: 1,
   inventoryPage: 1,
@@ -16,6 +19,7 @@ const el = {
   autoRefresh: document.querySelector("#auto-refresh"),
   lastRefresh: document.querySelector("#last-refresh"),
   error: document.querySelector("#error"),
+  pageSize: document.querySelector("#page-size"),
   deviceStatus: document.querySelector("#device-status"),
   runStatus: document.querySelector("#run-status"),
   runProfile: document.querySelector("#run-profile"),
@@ -50,6 +54,19 @@ function storedPackageView() {
     return packageViews.has(value) ? value : "package";
   } catch {
     return "package";
+  }
+}
+
+function pageSizeFromValue(value, fallback = 10) {
+  const size = Number.parseInt(String(value || ""), 10);
+  return pageSizes.has(size) ? size : fallback;
+}
+
+function storedPageSize() {
+  try {
+    return pageSizeFromValue(localStorage.getItem(pageSizeStorageKey), 10);
+  } catch {
+    return 10;
   }
 }
 
@@ -152,14 +169,23 @@ function pageFromParams(params, name) {
   return Number.isFinite(page) && page > 0 ? page : 1;
 }
 
-function offsetForPage(page, limit = 50) {
+function offsetForPage(page, limit = state.pageSize) {
   return (Math.max(1, page) - 1) * limit;
+}
+
+function resetPages() {
+  state.devicePage = 1;
+  state.runPage = 1;
+  state.inventoryPage = 1;
+  state.detailInventoryPage = 1;
 }
 
 function applyUrlStateFromLocation() {
   const url = new URL(window.location.href);
   const params = url.searchParams;
   state.selectedDeviceId = deviceIdFromPath(url.pathname);
+  state.pageSize = pageSizeFromValue(params.get("page_size"), storedPageSize());
+  el.pageSize.value = String(state.pageSize);
   state.devicePage = pageFromParams(params, "device_page");
   state.runPage = pageFromParams(params, "run_page");
   state.inventoryPage = pageFromParams(params, "inventory_page");
@@ -191,6 +217,9 @@ function currentAdminPath() {
   url.pathname = state.selectedDeviceId ? `/admin/devices/${encodeURIComponent(state.selectedDeviceId)}` : "/admin/";
   url.search = "";
   const params = url.searchParams;
+  if (state.pageSize !== 10) {
+    params.set("page_size", String(state.pageSize));
+  }
   setParamIfValue(params, "device_status", el.deviceStatus.value, "active");
   setPageParam(params, "device_page", state.devicePage);
   params.set("inventory_view", state.packageView);
@@ -241,7 +270,7 @@ function renderPagination(container, data, pageKey) {
     return `${gap}<button type="button" data-page="${candidate}" ${candidate === page ? 'aria-current="page"' : ""}>${candidate}</button>`;
   }).join("");
   container.innerHTML = `
-    <span>${formatNumber(total)} total</span>
+    <span>${formatNumber(total)} total · Page ${formatNumber(page)}${pageCount ? ` of ${formatNumber(pageCount)}` : ""}</span>
     <div class="page-buttons">
       <button type="button" data-page="1" ${page <= 1 || pageCount <= 0 ? "disabled" : ""}>First</button>
       <button type="button" data-page="${Math.max(1, page - 1)}" ${page <= 1 || pageCount <= 0 ? "disabled" : ""}>Prev</button>
@@ -294,7 +323,7 @@ async function loadHealth() {
 
 async function loadDevices() {
   const status = encodeURIComponent(el.deviceStatus.value);
-  const data = await getJSON(`/v1/ui/admin/devices?status=${status}&limit=50&offset=${offsetForPage(state.devicePage)}`);
+  const data = await getJSON(`/v1/ui/admin/devices?status=${status}&limit=${state.pageSize}&offset=${offsetForPage(state.devicePage)}`);
   state.devicePage = data.page || state.devicePage;
   renderPagination(el.devicesPagination, data, "devicePage");
   if (data.devices.length === 0) {
@@ -314,7 +343,7 @@ async function loadDevices() {
 }
 
 async function loadRuns() {
-  const params = new URLSearchParams({ limit: "50", offset: String(offsetForPage(state.runPage)) });
+  const params = new URLSearchParams({ limit: String(state.pageSize), offset: String(offsetForPage(state.runPage)) });
   if (state.selectedDeviceId) params.set("device_id", state.selectedDeviceId);
   if (el.runStatus.value) params.set("status", el.runStatus.value);
   if (el.runProfile.value.trim()) params.set("profile", el.runProfile.value.trim());
@@ -392,7 +421,7 @@ function syncPackageViewControls() {
 }
 
 async function loadPackages() {
-  const params = new URLSearchParams({ limit: "50", offset: String(offsetForPage(state.inventoryPage)) });
+  const params = new URLSearchParams({ limit: String(state.pageSize), offset: String(offsetForPage(state.inventoryPage)) });
   params.set("view", state.packageView);
   if (state.selectedDeviceId) params.set("device_id", state.selectedDeviceId);
   if (el.packageQuery.value.trim()) params.set("query", el.packageQuery.value.trim());
@@ -461,7 +490,7 @@ async function loadDeviceDetail(deviceId) {
 async function loadDevicePackages(deviceId = state.selectedDeviceId) {
   if (!deviceId) return;
   const packageParams = new URLSearchParams({
-    limit: "50",
+    limit: String(state.pageSize),
     offset: String(offsetForPage(state.detailInventoryPage)),
     view: state.packageView
   });
@@ -512,14 +541,28 @@ async function restoreFromLocation() {
 
 async function selectDevice(deviceId) {
   state.selectedDeviceId = deviceId;
-  state.runPage = 1;
-  state.inventoryPage = 1;
-  state.detailInventoryPage = 1;
+  resetPages();
+  state.devicePage = pageFromParams(new URL(window.location.href).searchParams, "device_page");
   syncUrlState("push");
   await loadDeviceDetail(deviceId);
 }
 
 el.refresh.addEventListener("click", refreshAll);
+el.pageSize.addEventListener("change", async () => {
+  state.pageSize = pageSizeFromValue(el.pageSize.value, 10);
+  el.pageSize.value = String(state.pageSize);
+  try {
+    localStorage.setItem(pageSizeStorageKey, String(state.pageSize));
+  } catch {
+    // Browser storage can be unavailable in restricted contexts.
+  }
+  resetPages();
+  syncUrlState("replace");
+  await refreshAll();
+  if (state.selectedDeviceId && !el.detail.hidden) {
+    await loadDeviceDetail(state.selectedDeviceId);
+  }
+});
 el.deviceStatus.addEventListener("change", () => {
   state.devicePage = 1;
   syncUrlState("replace");
@@ -571,9 +614,7 @@ el.packageView.forEach((input) => {
 });
 el.clearDevice.addEventListener("click", () => {
   state.selectedDeviceId = "";
-  state.runPage = 1;
-  state.inventoryPage = 1;
-  state.detailInventoryPage = 1;
+  resetPages();
   el.detail.hidden = true;
   syncUrlState("push");
   loadPackages();
@@ -626,6 +667,7 @@ if (globalThis.__hiveAdminTesting) {
     restoreFromLocation,
     selectDevice,
     setPage,
+    state,
     syncUrlState
   };
 }
