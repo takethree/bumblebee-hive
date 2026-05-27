@@ -27,6 +27,48 @@ interface DeviceRow {
   hmac_key_nonce: string;
 }
 
+interface AdminOverviewRow {
+  total_devices: number;
+  active_devices: number;
+  disabled_devices: number;
+}
+
+interface AdminRunOverviewRow {
+  total_runs: number;
+  complete_runs: number | null;
+  latest_run_received_at: string | null;
+}
+
+interface AdminBatchTotalRow {
+  total_batches: number;
+  total_records: number | null;
+}
+
+interface AdminDeviceRow {
+  device_id: string;
+  created_at: string;
+  disabled_at: string | null;
+  run_count: number;
+  batch_count: number;
+  record_count: number | null;
+  last_run_id: string | null;
+  last_run_profile: string | null;
+  last_run_status: string | null;
+  last_run_scanner_version: string | null;
+  last_run_received_at: string | null;
+}
+
+interface AdminRunRow {
+  device_id: string;
+  run_id: string;
+  profile: string;
+  status: string;
+  scanner_version: string | null;
+  received_at: string;
+  batch_count: number;
+  record_count: number | null;
+}
+
 interface ValidatedRecords {
   runID: string;
   summary: InventoryRecord | null;
@@ -58,6 +100,19 @@ export default {
       const disableMatch = url.pathname.match(/^\/v1\/admin\/devices\/([^/]+)\/disable$/);
       if (request.method === "POST" && disableMatch) {
         return await disableDevice(request, env, disableMatch[1]);
+      }
+      if (request.method === "GET" && url.pathname === "/v1/admin/overview") {
+        return await adminOverview(request, env);
+      }
+      if (request.method === "GET" && url.pathname === "/v1/admin/devices") {
+        return await adminDevices(request, env, url);
+      }
+      const deviceMatch = url.pathname.match(/^\/v1\/admin\/devices\/([^/]+)$/);
+      if (request.method === "GET" && deviceMatch) {
+        return await adminDeviceDetail(request, env, deviceMatch[1]);
+      }
+      if (request.method === "GET" && url.pathname === "/v1/admin/runs") {
+        return await adminRuns(request, env, url);
       }
       return json({ error: "not_found" }, 404);
     } catch (error) {
@@ -178,6 +233,186 @@ async function disableDevice(request: Request, env: Env, rawDeviceID: string): P
   return json({ ok: true, device_id: deviceID, disabled_at: disabledAt });
 }
 
+async function adminOverview(request: Request, env: Env): Promise<Response> {
+  requireAdminRequest(request, env);
+
+  const devices = await env.DB.prepare(
+    "SELECT COUNT(*) AS total_devices, SUM(CASE WHEN disabled_at IS NULL THEN 1 ELSE 0 END) AS active_devices, SUM(CASE WHEN disabled_at IS NOT NULL THEN 1 ELSE 0 END) AS disabled_devices FROM devices"
+  ).first<AdminOverviewRow>();
+  const runs = await env.DB.prepare(
+    "SELECT COUNT(*) AS total_runs, SUM(CASE WHEN status = 'complete' THEN 1 ELSE 0 END) AS complete_runs, MAX(received_at) AS latest_run_received_at FROM runs"
+  ).first<AdminRunOverviewRow>();
+  const batches = await env.DB.prepare(
+    "SELECT COUNT(*) AS total_batches, SUM(record_count) AS total_records FROM batches"
+  ).first<AdminBatchTotalRow>();
+
+  return adminJson({
+    devices: {
+      total: devices?.total_devices || 0,
+      active: devices?.active_devices || 0,
+      disabled: devices?.disabled_devices || 0
+    },
+    runs: {
+      total: runs?.total_runs || 0,
+      complete: runs?.complete_runs || 0,
+      latest_received_at: runs?.latest_run_received_at || null
+    },
+    batches: {
+      total: batches?.total_batches || 0,
+      records: batches?.total_records || 0
+    }
+  });
+}
+
+async function adminDevices(request: Request, env: Env, url: URL): Promise<Response> {
+  requireAdminRequest(request, env);
+
+  const status = url.searchParams.get("status") || "active";
+  if (!["active", "disabled", "all"].includes(status)) {
+    throw new HttpError(400, "invalid_status_filter");
+  }
+  const limit = boundedIntParam(url.searchParams, "limit", 50, 100);
+  const offset = boundedIntParam(url.searchParams, "offset", 0, 100000);
+  const where = status === "active"
+    ? "WHERE d.disabled_at IS NULL"
+    : status === "disabled"
+      ? "WHERE d.disabled_at IS NOT NULL"
+      : "";
+  const rows = await allRows<AdminDeviceRow>(
+    env.DB.prepare(`${adminDeviceSelect()} ${where} ORDER BY COALESCE(last_run_received_at, d.created_at) DESC LIMIT ? OFFSET ?`).bind(limit, offset)
+  );
+
+  return adminJson({
+    devices: rows.map(formatAdminDeviceRow),
+    limit,
+    offset,
+    status
+  });
+}
+
+async function adminDeviceDetail(request: Request, env: Env, rawDeviceID: string): Promise<Response> {
+  requireAdminRequest(request, env);
+
+  const deviceID = sanitizeDeviceID(decodeURIComponent(rawDeviceID));
+  if (!deviceID) {
+    throw new HttpError(400, "invalid_device_id");
+  }
+  const device = await env.DB.prepare(`${adminDeviceSelect()} WHERE d.device_id = ?`).bind(deviceID).first<AdminDeviceRow>();
+  if (!device) {
+    throw new HttpError(404, "device_not_found");
+  }
+  const runs = await allRows<AdminRunRow>(
+    env.DB.prepare(`${adminRunSelect()} WHERE r.device_id = ? ORDER BY r.received_at DESC LIMIT 10`).bind(deviceID)
+  );
+
+  return adminJson({
+    device: formatAdminDeviceRow(device),
+    recent_runs: rowsWithCounts(runs)
+  });
+}
+
+async function adminRuns(request: Request, env: Env, url: URL): Promise<Response> {
+  requireAdminRequest(request, env);
+
+  const where: string[] = [];
+  const values: (string | number)[] = [];
+  const deviceID = url.searchParams.get("device_id");
+  if (deviceID) {
+    const sanitized = sanitizeDeviceID(deviceID);
+    if (!sanitized) {
+      throw new HttpError(400, "invalid_device_id");
+    }
+    where.push("r.device_id = ?");
+    values.push(sanitized);
+  }
+  for (const [param, column] of [["status", "r.status"], ["profile", "r.profile"]] as const) {
+    const value = url.searchParams.get(param);
+    if (value) {
+      where.push(`${column} = ?`);
+      values.push(value);
+    }
+  }
+  const limit = boundedIntParam(url.searchParams, "limit", 50, 100);
+  const offset = boundedIntParam(url.searchParams, "offset", 0, 100000);
+  values.push(limit, offset);
+  const whereSQL = where.length ? `WHERE ${where.join(" AND ")}` : "";
+  const rows = await allRows<AdminRunRow>(
+    env.DB.prepare(`${adminRunSelect()} ${whereSQL} ORDER BY r.received_at DESC LIMIT ? OFFSET ?`).bind(...values)
+  );
+
+  return adminJson({
+    runs: rowsWithCounts(rows),
+    limit,
+    offset
+  });
+}
+
+function adminDeviceSelect(): string {
+  return `SELECT
+    d.device_id,
+    d.created_at,
+    d.disabled_at,
+    (SELECT COUNT(*) FROM runs r WHERE r.device_id = d.device_id) AS run_count,
+    (SELECT COUNT(*) FROM batches b WHERE b.device_id = d.device_id) AS batch_count,
+    (SELECT SUM(record_count) FROM batches b WHERE b.device_id = d.device_id) AS record_count,
+    (SELECT run_id FROM runs r WHERE r.device_id = d.device_id ORDER BY received_at DESC LIMIT 1) AS last_run_id,
+    (SELECT profile FROM runs r WHERE r.device_id = d.device_id ORDER BY received_at DESC LIMIT 1) AS last_run_profile,
+    (SELECT status FROM runs r WHERE r.device_id = d.device_id ORDER BY received_at DESC LIMIT 1) AS last_run_status,
+    (SELECT scanner_version FROM runs r WHERE r.device_id = d.device_id ORDER BY received_at DESC LIMIT 1) AS last_run_scanner_version,
+    (SELECT received_at FROM runs r WHERE r.device_id = d.device_id ORDER BY received_at DESC LIMIT 1) AS last_run_received_at
+  FROM devices d`;
+}
+
+function adminRunSelect(): string {
+  return `SELECT
+    r.device_id,
+    r.run_id,
+    r.profile,
+    r.status,
+    r.scanner_version,
+    r.received_at,
+    (SELECT COUNT(*) FROM batches b WHERE b.device_id = r.device_id AND b.run_id = r.run_id) AS batch_count,
+    (SELECT SUM(record_count) FROM batches b WHERE b.device_id = r.device_id AND b.run_id = r.run_id) AS record_count
+  FROM runs r`;
+}
+
+function formatAdminDeviceRow(row: AdminDeviceRow): object {
+  return {
+    device_id: row.device_id,
+    created_at: row.created_at,
+    disabled_at: row.disabled_at,
+    status: row.disabled_at ? "disabled" : "active",
+    run_count: row.run_count || 0,
+    batch_count: row.batch_count || 0,
+    record_count: row.record_count || 0,
+    last_run: row.last_run_id ? {
+      run_id: row.last_run_id,
+      profile: row.last_run_profile,
+      status: row.last_run_status,
+      scanner_version: row.last_run_scanner_version,
+      received_at: row.last_run_received_at
+    } : null
+  };
+}
+
+function rowsWithCounts(rows: AdminRunRow[]): object[] {
+  return rows.map((row) => ({
+    device_id: row.device_id,
+    run_id: row.run_id,
+    profile: row.profile,
+    status: row.status,
+    scanner_version: row.scanner_version,
+    received_at: row.received_at,
+    batch_count: row.batch_count || 0,
+    record_count: row.record_count || 0
+  }));
+}
+
+async function allRows<T>(statement: D1PreparedStatement): Promise<T[]> {
+  const result = await statement.all<T>();
+  return result.results || [];
+}
+
 function requireAccess(request: Request, env: Env): void {
   // Cloudflare Access consumes service-token headers at the edge and forwards
   // an application JWT to the Worker. Keep direct header support for local
@@ -194,11 +429,28 @@ function requireAccess(request: Request, env: Env): void {
   }
 }
 
+function requireAdminRequest(request: Request, env: Env): void {
+  requireAccess(request, env);
+  requireAdminToken(request, env);
+}
+
 function requireAdminToken(request: Request, env: Env): void {
   const token = request.headers.get(adminTokenHeader);
   if (!token || !constantTimeEqual(token, env.ADMIN_TOKEN)) {
     throw new HttpError(401, "invalid_admin_token");
   }
+}
+
+function boundedIntParam(params: URLSearchParams, name: string, fallback: number, max: number): number {
+  const value = params.get(name);
+  if (!value) {
+    return fallback;
+  }
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    throw new HttpError(400, `invalid_${name}`);
+  }
+  return Math.min(parsed, max);
 }
 
 function requireContentType(request: Request): void {
@@ -397,6 +649,13 @@ function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
     status,
     headers: { "Content-Type": "application/json" }
+  });
+}
+
+function adminJson(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "Content-Type": "application/json", "Cache-Control": "no-store" }
   });
 }
 

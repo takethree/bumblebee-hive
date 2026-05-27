@@ -1,0 +1,275 @@
+# GoalBuddy v2 state.yaml
+# Board truth lives here. goal.md is the editable charter; notes/ holds long receipts only.
+
+version: 2
+
+goal:
+  title: "Hive Operator Visibility"
+  slug: "hive-operator-visibility"
+  kind: existing_plan
+  tranche: "Add metadata-only admin JSON operator visibility to Bumblebee Hive."
+  status: done
+  oracle:
+    signal: "Admin JSON endpoints return overview, device, device detail, and run metadata under Access plus ADMIN_TOKEN without raw inventory exposure."
+    cadence: "after each Worker package and at final audit"
+    final_proof: "Passing Hive tests/typecheck/lint, data-minimization assertions, README docs, clean git status or committed changes, and final audit with full_outcome_complete: true."
+  intake:
+    original_request: "Let's do hive operator visibility. Come up with a plan, then $goalbuddy:goal-prep."
+    interpreted_outcome: "Prepare and execute a board for a first-pass Hive operator visibility API that exposes metadata-only admin JSON."
+    input_shape: existing_plan
+    audience: "Hive operators and maintainers."
+    authority: approved
+    proof_type: test
+    completion_proof: "Operator visibility API and docs are implemented and verified, with no dashboard/raw inventory/second-machine pilot scope."
+    likely_misfire: "Building a browser dashboard or exposing raw inventory before metadata-only JSON contracts are proven."
+    blind_spots_considered:
+      - "Raw inventory, summary_json, R2 object keys, and secrets must not be exposed."
+      - "Read-only visibility should use the existing Access plus ADMIN_TOKEN model."
+      - "A lightweight JSON API is the first slice; dashboard work is intentionally deferred."
+      - "Bumblebee scanner behavior does not need to change."
+    existing_plan_facts:
+      - "Add GET /v1/admin/overview."
+      - "Add GET /v1/admin/devices?status=active|disabled|all&limit=50&offset=0."
+      - "Add GET /v1/admin/devices/:device_id."
+      - "Add GET /v1/admin/runs?device_id=&status=&profile=&limit=50&offset=0."
+      - "Require Access plus X-Hive-Admin-Token."
+      - "Return metadata only; do not return summary_json, raw payloads, R2 keys, or secrets."
+      - "Add D1 indexes if useful for list queries."
+      - "Update README with redacted operator examples."
+
+rules:
+  pm_owns_state: true
+  one_active_task: true
+  max_write_workers: 1
+  no_implementation_without_worker_or_pm_task: true
+  no_completion_without_judge_or_pm_audit: true
+  planning_is_not_completion: true
+  queued_required_worker_blocks_completion: true
+  continuous_until_full_outcome: true
+  missing_input_or_credentials_do_not_stop_goal: true
+  preserve_and_validate_existing_plan: true
+  intake_misfire_must_be_audited: true
+  goal_pressure_requires_oracle: true
+  no_completion_on_weak_proof: true
+  slice_policy:
+    max_consecutive_tiny_tasks: 2
+    prefer_vertical_slices: true
+    judge_picks_largest_safe_slice: true
+    worker_completes_whole_slice: true
+
+agents:
+  scout: bundled_not_installed
+  worker: bundled_not_installed
+  judge: bundled_not_installed
+
+visual_board:
+  selected: local
+  local:
+    status: blocked
+    url: null
+    command: "npx goalbuddy board docs/goals/hive-operator-visibility"
+
+active_task: null
+
+tasks:
+  - id: T001
+    type: judge
+    assignee: Judge
+    status: done
+    reasoning_hint: high
+    objective: "Validate the operator-visibility plan against current Hive state and choose the first largest safe Worker package."
+    inputs:
+      - "docs/goals/hive-operator-visibility/goal.md"
+      - "docs/goals/hive-operator-visibility/state.yaml"
+      - "Approved plan from chat"
+      - "Current Bumblebee Hive repo"
+    constraints:
+      - "Read-only."
+      - "Do not implement."
+      - "Reject dashboard, raw inventory, summary_json, R2 key exposure, or second-machine pilot scope."
+      - "Reject TakeThree-specific defaults in public Hive source."
+    expected_output:
+      - "Decision: approve | revise | block"
+      - "Any plan corrections based on current repo state"
+      - "Exact first Worker objective"
+      - "allowed_files"
+      - "verify"
+      - "stop_if"
+    receipt:
+      result: done
+      decision: approve
+      summary: "The current Hive repo matches the plan: one Worker file, D1 devices/batches/runs tables, existing ADMIN_TOKEN auth for disable, and no visibility endpoints yet. The first safe Worker package is the JSON API plus focused in-memory D1 tests."
+      exact_first_worker_objective: "Implement metadata-only admin visibility endpoints, lightweight query helpers, and focused unit tests."
+      allowed_files:
+        - "src/index.ts"
+        - "test/ingest.test.ts"
+      verify:
+        - "npm test"
+        - "npm run typecheck"
+        - "npm run lint"
+        - "git diff --check"
+      stop_if:
+        - "Need to expose raw inventory, summary_json, R2 object keys, or secrets."
+        - "Need schema changes beyond indexes."
+        - "Need dashboard/UI work."
+        - "Auth cannot use Access plus ADMIN_TOKEN."
+
+  - id: T002
+    type: worker
+    assignee: Worker
+    status: done
+    reasoning_hint: medium
+    objective: "Implement metadata-only admin visibility endpoints, lightweight query helpers, and focused unit tests."
+    allowed_files:
+      - "src/index.ts"
+      - "test/ingest.test.ts"
+    verify:
+      - "npm test"
+      - "npm run typecheck"
+      - "npm run lint"
+      - "git diff --check"
+    stop_if:
+      - "Need to expose raw inventory, summary_json, R2 object keys, or secrets."
+      - "Need schema changes beyond indexes."
+      - "Need dashboard/UI work."
+      - "Auth cannot use Access plus ADMIN_TOKEN."
+    receipt:
+      result: done
+      changed_files:
+        - "src/index.ts"
+        - "test/ingest.test.ts"
+      commands:
+        - cmd: "npm test"
+          status: pass
+        - cmd: "npm run typecheck"
+          status: pass
+        - cmd: "npm run lint"
+          status: pass
+        - cmd: "git diff --check"
+          status: pass
+      summary: "Added metadata-only admin JSON endpoints for overview, devices, device detail, and runs. Added in-memory D1 query support and tests covering endpoint auth, filters, no-store responses, and forbidden-field minimization."
+
+  - id: T003
+    type: worker
+    assignee: Worker
+    status: done
+    reasoning_hint: medium
+    objective: "Add D1 index migration and operator README documentation for the visibility API."
+    allowed_files:
+      - "migrations/0002_admin_visibility_indexes.sql"
+      - "README.md"
+    verify:
+      - "npm test"
+      - "npm run typecheck"
+      - "npm run lint"
+      - "git diff --check"
+      - "rg -n \"TakeThree|takethree|take3|bbutner|brad\" README.md src test migrations"
+    stop_if:
+      - "Docs require real service-token, admin-token, device, or tenant values."
+      - "Migration requires destructive table rewrites."
+      - "Docs claim raw inventory browsing or dashboard support."
+    receipt:
+      result: done
+      changed_files:
+        - "migrations/0002_admin_visibility_indexes.sql"
+        - "README.md"
+      commands:
+        - cmd: "npm test"
+          status: pass
+        - cmd: "npm run typecheck"
+          status: pass
+        - cmd: "npm run lint"
+          status: pass
+        - cmd: "git diff --check"
+          status: pass
+        - cmd: "rg -n \"TakeThree|takethree|take3|bbutner|brad\" README.md src test migrations"
+          status: pass
+      summary: "Added non-destructive admin visibility indexes and README operator examples that document the Access plus admin-token model and metadata-only boundary without org-specific values."
+
+  - id: T004
+    type: worker
+    assignee: Worker
+    status: done
+    reasoning_hint: medium
+    objective: "Deploy if implementation changed the Worker or D1 schema, then run a redacted live metadata-only visibility smoke."
+    allowed_files:
+      - ".local"
+      - "docs/goals/hive-operator-visibility/notes/T004-live-smoke.md"
+      - "docs/goals/hive-operator-visibility/state.yaml"
+    verify:
+      - "Apply any new D1 migration with Wrangler if present."
+      - "npx wrangler deploy --config wrangler.deploy.toml"
+      - "Call overview, devices, and runs endpoints with redacted output."
+      - "Confirm responses contain metadata only and no summary_json/object_key/raw payload fields."
+    stop_if:
+      - "ADMIN_TOKEN or Access service token is unavailable."
+      - "Cloudflare Access no longer passes Service Auth requests."
+      - "Live smoke would expose raw inventory or real secrets in logs/receipts."
+      - "Need to perform the second-machine pilot."
+    receipt:
+      result: done
+      changed_files:
+        - "docs/goals/hive-operator-visibility/notes/T004-live-smoke.md"
+        - "docs/goals/hive-operator-visibility/state.yaml"
+      commands:
+        - cmd: "npx wrangler d1 migrations apply bumblebee-hive --remote --config wrangler.deploy.toml"
+          status: pass
+        - cmd: "npx wrangler deploy --config wrangler.deploy.toml"
+          status: pass
+        - cmd: "PowerShell HttpClient smoke for /v1/admin/overview, /v1/admin/devices, and /v1/admin/runs"
+          status: pass
+      summary: "Applied the admin visibility index migration remotely, deployed Worker version a1a8c06c-c04f-4705-8477-8fdc5a955526, and recorded a redacted live smoke showing 200/no-store responses with no forbidden field names."
+      note: "notes/T004-live-smoke.md"
+
+  - id: T999
+    type: judge
+    assignee: Judge
+    status: done
+    reasoning_hint: high
+    objective: "Audit whether the operator-visibility tranche is complete and metadata-only constraints held."
+    inputs:
+      - "All done task receipts"
+      - "Last verification"
+      - "Current dirty diff"
+      - "Current Hive deployment status if T004 ran"
+    constraints:
+      - "Do not implement."
+      - "Reject completion if required Worker work is still queued or active."
+      - "Reject completion if any admin endpoint exposes raw inventory, summary_json, R2 object keys, or secrets."
+      - "Reject completion if dashboard or second-machine pilot work was performed."
+    expected_output:
+      - "complete | not_complete"
+      - "full_outcome_complete: true | false"
+      - "verification evidence"
+      - "missing evidence"
+      - "next task if not complete"
+    receipt:
+      result: done
+      decision: complete
+      full_outcome_complete: true
+      verification_evidence:
+        - "npm test: pass, 2 files / 18 tests"
+        - "npm run typecheck: pass"
+        - "npm run lint: pass"
+        - "git diff --check: pass"
+        - "GoalBuddy checker: pass"
+        - "Remote D1 migration 0002_admin_visibility_indexes.sql: applied"
+        - "Wrangler deploy: Worker version a1a8c06c-c04f-4705-8477-8fdc5a955526"
+        - "Live smoke: overview/devices/runs returned 200, no-store, and no forbidden field matches"
+      missing_evidence: []
+      summary: "The operator-visibility tranche is complete. Hive now has Access plus ADMIN_TOKEN protected metadata-only admin JSON endpoints, docs, indexes, unit coverage, remote migration, deployed Worker, and redacted live smoke proof. No dashboard, raw inventory browsing, summary_json exposure, R2 object key exposure, or second-machine pilot work was performed."
+
+checks:
+  dirty_fingerprint: unknown
+  last_verification:
+    result: pass
+    task: T999
+    commands:
+      - "npm test"
+      - "npm run typecheck"
+      - "npm run lint"
+      - "git diff --check"
+      - "node C:\\Users\\bbutner\\.codex\\plugins\\cache\\goalbuddy\\goalbuddy\\0.3.7\\skills\\goalbuddy\\scripts\\check-goal-state.mjs docs\\goals\\hive-operator-visibility\\state.yaml"
+      - "npx wrangler d1 migrations apply bumblebee-hive --remote --config wrangler.deploy.toml"
+      - "npx wrangler deploy --config wrangler.deploy.toml"
+      - "PowerShell HttpClient smoke for /v1/admin/overview, /v1/admin/devices, and /v1/admin/runs"

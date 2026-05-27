@@ -116,3 +116,114 @@ Wrangler D1 fallback:
 npx wrangler d1 execute bumblebee-hive --remote `
   --command "UPDATE devices SET disabled_at = datetime('now') WHERE device_id = '<device-id>' AND disabled_at IS NULL;"
 ```
+
+## Operator Visibility
+
+Hive exposes metadata-only JSON endpoints for operators. They are protected by
+the same Cloudflare Access gate as ingest and also require `X-Hive-Admin-Token`.
+Responses include `Cache-Control: no-store`.
+
+```powershell
+$headers = @{
+  "CF-Access-Client-Id" = $env:BUMBLEBEE_HIVE_ACCESS_CLIENT_ID
+  "CF-Access-Client-Secret" = $env:BUMBLEBEE_HIVE_ACCESS_CLIENT_SECRET
+  "X-Hive-Admin-Token" = $env:BUMBLEBEE_HIVE_ADMIN_TOKEN
+}
+```
+
+Supported endpoints:
+
+- `GET /v1/admin/overview`
+- `GET /v1/admin/devices?status=active|disabled|all&limit=50&offset=0`
+- `GET /v1/admin/devices/<device-id>`
+- `GET /v1/admin/runs?device_id=<device-id>&status=complete&profile=baseline&limit=50&offset=0`
+
+Example overview:
+
+```powershell
+Invoke-RestMethod -Uri "https://hive.example.com/v1/admin/overview" -Headers $headers
+```
+
+Example response:
+
+```json
+{
+  "devices": { "total": 12, "active": 11, "disabled": 1 },
+  "runs": {
+    "total": 34,
+    "complete": 32,
+    "latest_received_at": "2026-05-26T19:45:00.000Z"
+  },
+  "batches": { "total": 36, "records": 12420 }
+}
+```
+
+Example active-device list:
+
+```powershell
+Invoke-RestMethod `
+  -Uri "https://hive.example.com/v1/admin/devices?status=active&limit=50&offset=0" `
+  -Headers $headers
+```
+
+Example response:
+
+```json
+{
+  "devices": [
+    {
+      "device_id": "device-redacted",
+      "created_at": "2026-05-26T18:30:00.000Z",
+      "disabled_at": null,
+      "status": "active",
+      "run_count": 3,
+      "batch_count": 3,
+      "record_count": 1200,
+      "last_run": {
+        "run_id": "run-redacted",
+        "profile": "baseline",
+        "status": "complete",
+        "scanner_version": "v0.1.0",
+        "received_at": "2026-05-26T19:45:00.000Z"
+      }
+    }
+  ],
+  "limit": 50,
+  "offset": 0,
+  "status": "active"
+}
+```
+
+Example run list:
+
+```powershell
+Invoke-RestMethod `
+  -Uri "https://hive.example.com/v1/admin/runs?profile=baseline&status=complete" `
+  -Headers $headers
+```
+
+Example response:
+
+```json
+{
+  "runs": [
+    {
+      "device_id": "device-redacted",
+      "run_id": "run-redacted",
+      "profile": "baseline",
+      "status": "complete",
+      "scanner_version": "v0.1.0",
+      "received_at": "2026-05-26T19:45:00.000Z",
+      "batch_count": 1,
+      "record_count": 400
+    }
+  ],
+  "limit": 50,
+  "offset": 0
+}
+```
+
+These endpoints intentionally do not expose raw inventory records, `summary_json`,
+R2 object keys, body hashes, HMAC key material, Access credentials, local user
+names, SIDs, hostnames, or profile paths. Use R2/D1 operator tooling separately
+for break-glass forensic access to raw batches.
