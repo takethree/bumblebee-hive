@@ -10,6 +10,9 @@
 - `npm test`, `npm run typecheck`, and `npm run lint` passed.
 - Sensitive-value searches found no org-specific hostnames, local usernames, raw local profile paths, known Access token fragments, or TakeThree-specific values in touched docs and receipts.
 - `git diff --check` passed in Hive and Bumblebee, with only expected CRLF working-tree warnings.
+- A final hidden-file audit found that generated local board logs included a
+  local machine path from the GoalBuddy CLI error stream. Those generated logs
+  were removed from the repo before final closure.
 
 ## Publish Scope
 

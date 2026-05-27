@@ -24,7 +24,7 @@ visual_board:
   selected: local
   status: blocked
   url: null
-  note: "Local board startup failed before serving a URL: goalbuddy catalog fetch returned HTTP 404. File-backed board remains authoritative."
+  note: "Local board startup failed before serving a URL: goalbuddy catalog fetch returned HTTP 404. Generated board logs were not kept because the error stream included local machine paths."
 rules:
   continuous_until_full_outcome: true
   missing_input_or_credentials_do_not_stop_goal: true
@@ -160,7 +160,7 @@ tasks:
           status: pass
         - cmd: "git diff --check in Hive and Bumblebee"
           status: pass
-      summary: "Repeated the verification set, confirmed no unrelated dirty files before staging, and prepared the Hive and Bumblebee docs changes for commit/push."
+      summary: "Repeated the verification set, confirmed no unrelated dirty files before staging, and prepared the Hive and Bumblebee docs changes for commit/push. A final hidden-file audit later removed generated board logs because the error stream included local machine paths."
   - id: T999
     type: judge
     assignee: Judge
