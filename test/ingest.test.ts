@@ -31,6 +31,9 @@ class MemoryStmt {
   async first<T>(): Promise<T | null> {
     if (this.sql.startsWith("SELECT hmac_key_ciphertext")) {
       const device = this.db.devices.get(String(this.values[0]));
+      if (device?.disabled_at) {
+        return null;
+      }
       return (device || null) as T | null;
     }
     return null;
@@ -40,19 +43,27 @@ class MemoryStmt {
     if (this.sql.startsWith("INSERT INTO devices")) {
       this.db.devices.set(String(this.values[0]), {
         hmac_key_ciphertext: String(this.values[1]),
-        hmac_key_nonce: String(this.values[2])
+        hmac_key_nonce: String(this.values[2]),
+        disabled_at: null
       });
     } else if (this.sql.startsWith("INSERT INTO batches")) {
       this.db.batches.push(this.values);
     } else if (this.sql.startsWith("INSERT OR REPLACE INTO runs")) {
       this.db.runs.push(this.values);
+    } else if (this.sql.startsWith("UPDATE devices SET disabled_at")) {
+      const device = this.db.devices.get(String(this.values[1]));
+      if (device && !device.disabled_at) {
+        device.disabled_at = String(this.values[0]);
+        return { success: true, meta: { duration: 0, changes: 1 } } as D1Result;
+      }
+      return { success: true, meta: { duration: 0, changes: 0 } } as D1Result;
     }
     return { success: true, meta: { duration: 0 } } as D1Result;
   }
 }
 
 class MemoryD1 {
-  devices = new Map<string, { hmac_key_ciphertext: string; hmac_key_nonce: string }>();
+  devices = new Map<string, { hmac_key_ciphertext: string; hmac_key_nonce: string; disabled_at: string | null }>();
   batches: unknown[][] = [];
   runs: unknown[][] = [];
 
@@ -69,6 +80,7 @@ function makeEnv(): Env & { RAW_BATCHES: MemoryR2; DB: MemoryD1; NORMALIZE_QUEUE
   return {
     ACCESS_CLIENT_ID: "access-id",
     ACCESS_CLIENT_SECRET: "access-secret",
+    ADMIN_TOKEN: "admin-token",
     ENROLLMENT_TOKEN: "enroll-token",
     HIVE_KEY_ENCRYPTION_KEY: base64url(crypto.getRandomValues(new Uint8Array(32))),
     RAW_BATCHES: new MemoryR2() as unknown as MemoryR2 & R2Bucket,
@@ -81,7 +93,8 @@ async function addDevice(env: Env & { DB: MemoryD1 }, deviceID: string, hmacKey:
   const encrypted = await testInternals.encryptSecret(env, hmacKey);
   env.DB.devices.set(deviceID, {
     hmac_key_ciphertext: encrypted.ciphertext,
-    hmac_key_nonce: encrypted.nonce
+    hmac_key_nonce: encrypted.nonce,
+    disabled_at: null
   });
 }
 
@@ -176,6 +189,64 @@ describe("bumblebee hive worker", () => {
     const response = await worker.fetch(request, env);
 
     expect(response.status).toBe(401);
+  });
+
+  it("disables a device through the admin endpoint and rejects later ingest", async () => {
+    const env = makeEnv();
+    const hmacKey = "device-secret";
+    await addDevice(env, "device-1", hmacKey);
+
+    const disableResponse = await worker.fetch(new Request("https://hive.example.test/v1/admin/devices/device-1/disable", {
+      method: "POST",
+      headers: {
+        "CF-Access-Client-Id": "access-id",
+        "CF-Access-Client-Secret": "access-secret",
+        "X-Hive-Admin-Token": "admin-token"
+      }
+    }), env);
+
+    expect(disableResponse.status).toBe(200);
+    expect(env.DB.devices.get("device-1")?.disabled_at).toBeTruthy();
+
+    const request = await signedRequest(env, gzipSync("{\"record_type\":\"scan_summary\",\"run_id\":\"run-1\"}\n"), hmacKey);
+    const ingestResponse = await worker.fetch(request, env);
+
+    expect(ingestResponse.status).toBe(401);
+    expect(await ingestResponse.json()).toEqual({ error: "unknown_device" });
+  });
+
+  it("rejects admin disable without the admin token", async () => {
+    const env = makeEnv();
+    await addDevice(env, "device-1", "device-secret");
+
+    const response = await worker.fetch(new Request("https://hive.example.test/v1/admin/devices/device-1/disable", {
+      method: "POST",
+      headers: {
+        "CF-Access-Client-Id": "access-id",
+        "CF-Access-Client-Secret": "access-secret"
+      }
+    }), env);
+
+    expect(response.status).toBe(401);
+    expect(env.DB.devices.get("device-1")?.disabled_at).toBeNull();
+  });
+
+  it("rejects admin disable before token check when Access is invalid", async () => {
+    const env = makeEnv();
+    await addDevice(env, "device-1", "device-secret");
+
+    const response = await worker.fetch(new Request("https://hive.example.test/v1/admin/devices/device-1/disable", {
+      method: "POST",
+      headers: {
+        "CF-Access-Client-Id": "access-id",
+        "CF-Access-Client-Secret": "wrong",
+        "X-Hive-Admin-Token": "admin-token"
+      }
+    }), env);
+
+    expect(response.status).toBe(401);
+    expect(await response.json()).toEqual({ error: "invalid_access_token" });
+    expect(env.DB.devices.get("device-1")?.disabled_at).toBeNull();
   });
 
   it("accepts Cloudflare Access forwarded JWT header", async () => {

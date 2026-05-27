@@ -18,7 +18,8 @@ param(
   [string]$ScanProfile = "baseline",
   [string[]]$ScanRoot = @(),
   [switch]$SkipSchedule,
-  [switch]$SkipSelfTest
+  [switch]$SkipSelfTest,
+  [switch]$Uninstall
 )
 
 Set-StrictMode -Version Latest
@@ -103,6 +104,53 @@ function Expand-BumblebeeZip {
     throw "release archive did not contain bumblebee.exe"
   }
   $exe.FullName
+}
+
+function Remove-FileIfPresent {
+  param([string]$Path)
+  if (Test-Path -LiteralPath $Path -PathType Leaf) {
+    Remove-Item -LiteralPath $Path -Force
+  }
+}
+
+function Remove-DirectoryIfEmpty {
+  param([string]$Path)
+  if (Test-Path -LiteralPath $Path -PathType Container) {
+    $child = Get-ChildItem -LiteralPath $Path -Force -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $child) {
+      Remove-Item -LiteralPath $Path -Force
+    }
+  }
+}
+
+function Uninstall-Bumblebee {
+  param(
+    [string]$TargetRoot,
+    [string]$TargetConfigRoot,
+    [string]$TargetTaskName
+  )
+
+  if (-not $SkipSchedule) {
+    $task = Get-ScheduledTask -TaskName $TargetTaskName -ErrorAction SilentlyContinue
+    if ($task) {
+      Unregister-ScheduledTask -TaskName $TargetTaskName -Confirm:$false
+    }
+  }
+
+  Remove-FileIfPresent -Path (Join-Path $TargetConfigRoot "run-baseline.ps1")
+  Remove-FileIfPresent -Path (Join-Path $TargetConfigRoot "secrets.clixml")
+  Remove-FileIfPresent -Path (Join-Path $TargetConfigRoot "config.json")
+  Remove-DirectoryIfEmpty -Path $TargetConfigRoot
+
+  Remove-FileIfPresent -Path (Join-Path $TargetRoot "bumblebee.exe")
+  Remove-DirectoryIfEmpty -Path $TargetRoot
+
+  [pscustomobject]@{
+    install_root = $TargetRoot
+    config_root = $TargetConfigRoot
+    task_name = $TargetTaskName
+    uninstalled = $true
+  } | ConvertTo-Json
 }
 
 function Invoke-HiveEnroll {
@@ -190,6 +238,14 @@ exit $LASTEXITCODE
 }
 
 Require-Value -Name "HiveBaseUrl" -Value $HiveBaseUrl
+
+if ($Uninstall) {
+  if ($PSCmdlet.ShouldProcess($InstallRoot, "Uninstall Bumblebee local files and scheduled task")) {
+    Uninstall-Bumblebee -TargetRoot $InstallRoot -TargetConfigRoot $ConfigRoot -TargetTaskName $TaskName
+  }
+  return
+}
+
 Require-Value -Name "AccessClientId" -Value $AccessClientId
 Require-Value -Name "AccessClientSecret" -Value $AccessClientSecret
 

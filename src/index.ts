@@ -1,6 +1,7 @@
 export interface Env {
   ACCESS_CLIENT_ID: string;
   ACCESS_CLIENT_SECRET: string;
+  ADMIN_TOKEN: string;
   ENROLLMENT_TOKEN: string;
   HIVE_KEY_ENCRYPTION_KEY: string;
   RAW_BATCHES: R2Bucket;
@@ -37,6 +38,7 @@ const deviceHeader = "X-Inventory-Device-Id";
 const accessClientIDHeader = "CF-Access-Client-Id";
 const accessClientSecretHeader = "CF-Access-Client-Secret";
 const accessJWTHeader = "Cf-Access-Jwt-Assertion";
+const adminTokenHeader = "X-Hive-Admin-Token";
 const defaultMaxBodyBytes = 5 * 1024 * 1024;
 const defaultTimestampSkewSeconds = 300;
 
@@ -52,6 +54,10 @@ export default {
       }
       if (request.method === "POST" && url.pathname === "/v1/ingest") {
         return await ingest(request, env);
+      }
+      const disableMatch = url.pathname.match(/^\/v1\/admin\/devices\/([^/]+)\/disable$/);
+      if (request.method === "POST" && disableMatch) {
+        return await disableDevice(request, env, disableMatch[1]);
       }
       return json({ error: "not_found" }, 404);
     } catch (error) {
@@ -151,6 +157,27 @@ async function ingest(request: Request, env: Env): Promise<Response> {
   return json({ ok: true, batch_id: batchID, run_id: runID, records: records.length, run_complete: summary !== null });
 }
 
+async function disableDevice(request: Request, env: Env, rawDeviceID: string): Promise<Response> {
+  requireAccess(request, env);
+  requireAdminToken(request, env);
+
+  const deviceID = sanitizeDeviceID(decodeURIComponent(rawDeviceID));
+  if (!deviceID) {
+    throw new HttpError(400, "invalid_device_id");
+  }
+
+  const disabledAt = new Date().toISOString();
+  const result = await env.DB.prepare(
+    "UPDATE devices SET disabled_at = ? WHERE device_id = ? AND disabled_at IS NULL"
+  ).bind(disabledAt, deviceID).run();
+  const changes = typeof result.meta?.changes === "number" ? result.meta.changes : 0;
+  if (changes === 0) {
+    throw new HttpError(404, "device_not_found");
+  }
+
+  return json({ ok: true, device_id: deviceID, disabled_at: disabledAt });
+}
+
 function requireAccess(request: Request, env: Env): void {
   // Cloudflare Access consumes service-token headers at the edge and forwards
   // an application JWT to the Worker. Keep direct header support for local
@@ -164,6 +191,13 @@ function requireAccess(request: Request, env: Env): void {
   if (!constantTimeEqual(clientID || "", env.ACCESS_CLIENT_ID) ||
       !constantTimeEqual(clientSecret || "", env.ACCESS_CLIENT_SECRET)) {
     throw new HttpError(401, "invalid_access_token");
+  }
+}
+
+function requireAdminToken(request: Request, env: Env): void {
+  const token = request.headers.get(adminTokenHeader);
+  if (!token || !constantTimeEqual(token, env.ADMIN_TOKEN)) {
+    throw new HttpError(401, "invalid_admin_token");
   }
 }
 

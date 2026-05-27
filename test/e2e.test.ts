@@ -1,5 +1,5 @@
 import { createServer, IncomingMessage } from "node:http";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { access, mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -10,6 +10,15 @@ import worker, { Env, testInternals } from "../src/index";
 
 const execFile = promisify(execFileCallback);
 const here = dirname(fileURLToPath(import.meta.url));
+
+async function exists(path: string): Promise<boolean> {
+  try {
+    await access(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 class MemoryR2 {
   objects = new Map<string, Uint8Array>();
@@ -81,6 +90,7 @@ function makeEnv(): Env & { RAW_BATCHES: MemoryR2; DB: MemoryD1; NORMALIZE_QUEUE
   return {
     ACCESS_CLIENT_ID: "access-id",
     ACCESS_CLIENT_SECRET: "access-secret",
+    ADMIN_TOKEN: "admin-token",
     ENROLLMENT_TOKEN: "enroll-token",
     HIVE_KEY_ENCRYPTION_KEY: base64url(crypto.getRandomValues(new Uint8Array(32))),
     RAW_BATCHES: new MemoryR2() as unknown as MemoryR2 & R2Bucket,
@@ -98,6 +108,48 @@ async function addDevice(env: Env & { DB: MemoryD1 }, deviceID: string, hmacKey:
 }
 
 describe("local deployment smoke", () => {
+  it("uninstalls generated local files without deleting unrelated content", async () => {
+    if (process.platform !== "win32") {
+      return;
+    }
+
+    const temp = await mkdtemp(join(tmpdir(), "bumblebee-hive-uninstall-"));
+    try {
+      const installRoot = join(temp, "install");
+      const configRoot = join(temp, "config");
+      await mkdir(installRoot);
+      await mkdir(configRoot);
+      await writeFile(join(installRoot, "bumblebee.exe"), "fake");
+      await writeFile(join(installRoot, "unrelated.txt"), "keep");
+      await writeFile(join(configRoot, "config.json"), "{}");
+      await writeFile(join(configRoot, "secrets.clixml"), "<Objs />");
+      await writeFile(join(configRoot, "run-baseline.ps1"), "exit 0");
+      await writeFile(join(configRoot, "unrelated.txt"), "keep");
+
+      const installer = resolve(here, "..", "scripts", "install-bumblebee.ps1");
+      const args = [
+        "-NoProfile",
+        "-ExecutionPolicy", "Bypass",
+        "-File", installer,
+        "-Uninstall",
+        "-SkipSchedule",
+        "-InstallRoot", installRoot,
+        "-ConfigRoot", configRoot
+      ];
+      await execFile("powershell", args);
+      await execFile("powershell", args);
+
+      expect(await exists(join(installRoot, "bumblebee.exe"))).toBe(false);
+      expect(await exists(join(configRoot, "config.json"))).toBe(false);
+      expect(await exists(join(configRoot, "secrets.clixml"))).toBe(false);
+      expect(await exists(join(configRoot, "run-baseline.ps1"))).toBe(false);
+      expect(await readFile(join(installRoot, "unrelated.txt"), "utf8")).toBe("keep");
+      expect(await readFile(join(configRoot, "unrelated.txt"), "utf8")).toBe("keep");
+    } finally {
+      await rm(temp, { recursive: true, force: true });
+    }
+  });
+
   it("installs Bumblebee and delivers a complete scan through Hive", async () => {
     if (process.env.BUMBLEBEE_E2E !== "1") {
       return;
