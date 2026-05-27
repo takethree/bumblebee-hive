@@ -1,10 +1,10 @@
 version: 2
 goal:
-  status: active
+  status: done
   title: Hive Device Lifecycle Controls
   slug: hive-device-lifecycle-controls
   created_at: "2026-05-27"
-  first_milestone_complete: false
+  first_milestone_complete: true
   intake:
     original_request: "$goalbuddy:goal-prep"
     interpreted_outcome: "Add audit-backed device disable/enable controls through both script APIs and the Hive admin UI without weakening browser-secret or admin-token boundaries."
@@ -39,7 +39,7 @@ rules:
   missing_input_or_credentials_do_not_stop_goal: true
   goal_pressure_requires_oracle: true
   no_completion_on_weak_proof: true
-active_task: T006
+active_task: null
 tasks:
   - id: T001
     type: judge
@@ -251,7 +251,7 @@ tasks:
   - id: T006
     type: pm
     assignee: PM
-    status: active
+    status: done
     objective: "Resume UI lifecycle smoke when the operator provides the allowlist value and browser Access actor prerequisites."
     allowed_files:
       - "docs/goals/hive-device-lifecycle-controls/state.yaml"
@@ -264,11 +264,28 @@ tasks:
       - "Operator input is still missing."
       - "Browser Access session is still unavailable."
       - "No disposable or approved target device is available."
-    receipt: null
+    receipt:
+      result: done
+      decision: done
+      full_outcome_complete: false
+      note: "See notes/T006-ui-live-smoke.md."
+      changed_files:
+        - "docs/goals/hive-device-lifecycle-controls/state.yaml"
+        - "docs/goals/hive-device-lifecycle-controls/notes/T006-ui-live-smoke.md"
+      commands:
+        - cmd: "npx wrangler secret put UI_ADMIN_ACTION_EMAILS --config wrangler.deploy.toml"
+          status: pass
+        - cmd: "npx wrangler deploy --config wrangler.deploy.toml"
+          status: pass
+        - cmd: "Service-token probe for configured UI allowlist"
+          status: pass
+        - cmd: "Redacted live UI disable/enable verification through admin detail"
+          status: pass
+      summary: "Configured the UI action allowlist, redeployed, verified the UI browser disable/enable actions produced two UI audit events, then left the disposable smoke device disabled."
   - id: T999
     type: judge
     assignee: Judge
-    status: queued
+    status: done
     objective: "Final audit: decide whether the lifecycle-controls tranche satisfies the original owner outcome."
     allowed_files:
       - "docs/goals/hive-device-lifecycle-controls/state.yaml"
@@ -280,4 +297,9 @@ tasks:
     stop_if:
       - "Any final proof is weak, stale, missing, or contains sensitive values."
       - "Queued or active Worker work remains required for lifecycle controls."
-    receipt: null
+    receipt:
+      result: done
+      decision: complete
+      full_outcome_complete: true
+      note: "See notes/T999-final-audit.md."
+      summary: "Final audit approved lifecycle controls as complete: script and UI disable/enable paths are deployed, audited, metadata-only, browser-secret-safe, documented, tested, and live-smoked with disposable devices."
