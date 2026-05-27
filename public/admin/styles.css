@@ -412,6 +412,7 @@ tr[data-package-name]:hover {
 
 .status.disabled,
 .status.error,
+.status.critical,
 .status.stale {
   background: #fde8e8;
   color: var(--danger);
@@ -419,6 +420,7 @@ tr[data-package-name]:hover {
 
 .status.partial,
 .status.processing,
+.status.warning,
 .status.attention {
   background: #ffedd5;
   color: var(--warn);

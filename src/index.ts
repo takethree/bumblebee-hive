@@ -20,6 +20,7 @@ export interface Env {
   HEALTH_EXPECTED_CADENCE_HOURS?: string;
   HEALTH_STALE_HOURS?: string;
   HEALTH_WEEKEND_GRACE_HOURS?: string;
+  NORMALIZATION_PROCESSING_STALE_MINUTES?: string;
   UI_ADMIN_ACTION_EMAILS?: string;
   UI_ADMIN_ACTION_DOMAINS?: string;
 }
@@ -111,6 +112,7 @@ interface AdminHealthRow {
   last_run_status: string | null;
   last_run_scanner_version: string | null;
   last_run_received_at: string | null;
+  last_complete_run_id: string | null;
   last_complete_received_at: string | null;
 }
 
@@ -312,6 +314,7 @@ const defaultHealthProfile = "baseline";
 const defaultHealthExpectedCadenceHours = 6;
 const defaultHealthStaleHours = 24;
 const defaultHealthWeekendGraceHours = 72;
+const defaultNormalizationProcessingStaleMinutes = 30;
 const accessJWKSByURL = new Map<string, ReturnType<typeof createRemoteJWKSet>>();
 
 type LifecycleAction = "disable" | "enable";
@@ -365,6 +368,12 @@ export default {
       }
       if (request.method === "GET" && url.pathname === "/v1/ui/admin/overview") {
         return await uiAdminOverview(request, env);
+      }
+      if (request.method === "GET" && url.pathname === "/v1/admin/attention") {
+        return await adminAttention(request, env, url);
+      }
+      if (request.method === "GET" && url.pathname === "/v1/ui/admin/attention") {
+        return await uiAdminAttention(request, env, url);
       }
       if (request.method === "GET" && url.pathname === "/v1/ui/admin/health") {
         return await uiAdminHealth(request, env);
@@ -928,6 +937,16 @@ async function uiAdminOverview(request: Request, env: Env): Promise<Response> {
   return adminJson(await adminOverviewData(env));
 }
 
+async function adminAttention(request: Request, env: Env, url: URL): Promise<Response> {
+  requireAdminRequest(request, env);
+  return adminJson(await adminAttentionData(env, url));
+}
+
+async function uiAdminAttention(request: Request, env: Env, url: URL): Promise<Response> {
+  await requireUIAdminRequest(request, env);
+  return adminJson(await adminAttentionData(env, url));
+}
+
 async function uiAdminHealth(request: Request, env: Env): Promise<Response> {
   await requireUIAdminRequest(request, env);
   return adminJson(await adminHealthData(env));
@@ -972,10 +991,12 @@ async function adminHealthData(env: Env): Promise<object> {
       (SELECT status FROM runs r WHERE r.device_id = d.device_id AND r.profile = ? ORDER BY received_at DESC LIMIT 1) AS last_run_status,
       (SELECT scanner_version FROM runs r WHERE r.device_id = d.device_id AND r.profile = ? ORDER BY received_at DESC LIMIT 1) AS last_run_scanner_version,
       (SELECT received_at FROM runs r WHERE r.device_id = d.device_id AND r.profile = ? ORDER BY received_at DESC LIMIT 1) AS last_run_received_at,
+      (SELECT run_id FROM runs r WHERE r.device_id = d.device_id AND r.profile = ? AND r.status = 'complete' ORDER BY received_at DESC LIMIT 1) AS last_complete_run_id,
       (SELECT received_at FROM runs r WHERE r.device_id = d.device_id AND r.profile = ? AND r.status = 'complete' ORDER BY received_at DESC LIMIT 1) AS last_complete_received_at
     FROM devices d
     WHERE d.disabled_at IS NULL
     ORDER BY COALESCE(last_run_received_at, d.created_at) DESC`).bind(
+      config.profile,
       config.profile,
       config.profile,
       config.profile,
@@ -998,6 +1019,72 @@ async function adminHealthData(env: Env): Promise<object> {
     },
     counts,
     devices
+  };
+}
+
+async function adminAttentionData(env: Env, url: URL): Promise<object> {
+  const severity = url.searchParams.get("severity") || "all";
+  if (!["all", "critical", "warning"].includes(severity)) {
+    throw new HttpError(400, "invalid_attention_severity");
+  }
+  const reason = url.searchParams.get("reason") || "";
+  if (reason && !isAttentionReason(reason)) {
+    throw new HttpError(400, "invalid_attention_reason");
+  }
+
+  const limit = boundedIntParam(url.searchParams, "limit", 10, 100);
+  const offset = boundedIntParam(url.searchParams, "offset", 0, 100000);
+  const config = attentionConfig(env);
+  const health = await adminHealthData(env) as {
+    devices: HealthDevice[];
+  };
+  const attention: AttentionItem[] = [];
+  const now = new Date();
+
+  for (const device of health.devices) {
+    if (isAttentionReason(device.reason)) {
+      attention.push(attentionItem(device, device.reason, null, config, now));
+    }
+
+    const completeRunID = device.last_completed_run_id;
+    if (!completeRunID) {
+      continue;
+    }
+
+    const job = await env.DB.prepare(`${adminNormalizationJobSelect()} WHERE device_id = ? AND run_id = ? ORDER BY started_at DESC LIMIT 1`)
+      .bind(device.device_id, completeRunID)
+      .first<AdminNormalizationJobRow>();
+    const normalizationReason = normalizationAttentionReason(job, config, now);
+    if (normalizationReason) {
+      attention.push(attentionItem(device, normalizationReason, job || null, config, now));
+    }
+  }
+
+  const filtered = attention.filter((item) =>
+    (severity === "all" || item.severity === severity) &&
+    (!reason || item.reason === reason)
+  );
+  filtered.sort((left, right) => {
+    const severityOrder = severityRank(left.severity) - severityRank(right.severity);
+    if (severityOrder !== 0) return severityOrder;
+    return (right.observed_at || "").localeCompare(left.observed_at || "");
+  });
+
+  return {
+    config: {
+      profile: config.profile,
+      expected_cadence_hours: config.expectedCadenceHours,
+      stale_hours: config.staleHours,
+      weekend_grace_hours: config.weekendGraceHours,
+      normalization_processing_stale_minutes: config.normalizationProcessingStaleMinutes
+    },
+    counts: attentionCounts(attention),
+    attention: filtered.slice(offset, offset + limit),
+    ...paginationMeta(filtered.length, limit, offset),
+    filters: {
+      severity,
+      reason: reason || null
+    }
   };
 }
 
@@ -1881,12 +1968,25 @@ function formatLifecycleEventRow(row: AdminLifecycleEventRow): object {
 }
 
 type HealthStatus = "healthy" | "stale" | "attention" | "unknown";
+type AttentionSeverity = "critical" | "warning";
+type AttentionReason =
+  | "latest_run_not_complete"
+  | "latest_complete_run_too_old"
+  | "no_monitored_profile_run"
+  | "normalization_missing"
+  | "normalization_error"
+  | "normalization_processing_stale"
+  | "normalization_not_promoted";
 
 interface HealthConfig {
   profile: string;
   expectedCadenceHours: number;
   staleHours: number;
   weekendGraceHours: number;
+}
+
+interface AttentionConfig extends HealthConfig {
+  normalizationProcessingStaleMinutes: number;
 }
 
 interface HealthDevice {
@@ -1898,6 +1998,7 @@ interface HealthDevice {
   stale_after_hours: number;
   age_hours: number | null;
   last_completed_received_at: string | null;
+  last_completed_run_id: string | null;
   last_run: {
     run_id: string;
     status: string | null;
@@ -1905,6 +2006,44 @@ interface HealthDevice {
     received_at: string | null;
   } | null;
 }
+
+interface AttentionItem {
+  device_id: string;
+  severity: AttentionSeverity;
+  reason: AttentionReason;
+  profile: string;
+  observed_at: string | null;
+  age_hours: number | null;
+  stale_after_hours: number;
+  run: {
+    run_id: string | null;
+    status: string | null;
+    scanner_version: string | null;
+    received_at: string | null;
+    completed_run_id: string | null;
+    completed_received_at: string | null;
+  };
+  normalization_job: {
+    status: string;
+    records_seen: number;
+    packages_seen: number;
+    findings_seen: number;
+    promoted_current: boolean;
+    error: string | null;
+    started_at: string;
+    completed_at: string | null;
+  } | null;
+}
+
+const attentionSeverityByReason: Record<AttentionReason, AttentionSeverity> = {
+  latest_run_not_complete: "critical",
+  latest_complete_run_too_old: "warning",
+  no_monitored_profile_run: "warning",
+  normalization_missing: "warning",
+  normalization_error: "critical",
+  normalization_processing_stale: "critical",
+  normalization_not_promoted: "warning"
+};
 
 function healthConfig(env: Env): HealthConfig {
   const profile = (env.HEALTH_PROFILE || defaultHealthProfile).trim() || defaultHealthProfile;
@@ -1914,6 +2053,89 @@ function healthConfig(env: Env): HealthConfig {
     staleHours: positiveInt(env.HEALTH_STALE_HOURS, defaultHealthStaleHours),
     weekendGraceHours: nonNegativeInt(env.HEALTH_WEEKEND_GRACE_HOURS, defaultHealthWeekendGraceHours)
   };
+}
+
+function attentionConfig(env: Env): AttentionConfig {
+  return {
+    ...healthConfig(env),
+    normalizationProcessingStaleMinutes: positiveInt(env.NORMALIZATION_PROCESSING_STALE_MINUTES, defaultNormalizationProcessingStaleMinutes)
+  };
+}
+
+function isAttentionReason(value: string): value is AttentionReason {
+  return Object.prototype.hasOwnProperty.call(attentionSeverityByReason, value);
+}
+
+function severityRank(value: AttentionSeverity): number {
+  return value === "critical" ? 0 : 1;
+}
+
+function normalizationAttentionReason(job: AdminNormalizationJobRow | null, config: AttentionConfig, now: Date): AttentionReason | null {
+  if (!job) {
+    return "normalization_missing";
+  }
+  if (job.status === "error") {
+    return "normalization_error";
+  }
+  if (job.status === "processing") {
+    const startedAt = parseDate(job.started_at);
+    if (startedAt && now.getTime() - startedAt.getTime() > config.normalizationProcessingStaleMinutes * 60000) {
+      return "normalization_processing_stale";
+    }
+    return null;
+  }
+  if (job.status === "complete" && !job.promoted_current) {
+    return "normalization_not_promoted";
+  }
+  return null;
+}
+
+function attentionItem(
+  device: HealthDevice,
+  reason: AttentionReason,
+  job: AdminNormalizationJobRow | null,
+  config: AttentionConfig,
+  now: Date
+): AttentionItem {
+  const jobStarted = job ? parseDate(job.started_at) : null;
+  const observedAt = job?.completed_at || job?.started_at || device.last_run?.received_at || device.last_completed_received_at;
+  return {
+    device_id: device.device_id,
+    severity: attentionSeverityByReason[reason],
+    reason,
+    profile: config.profile,
+    observed_at: observedAt || null,
+    age_hours: jobStarted ? roundHours((now.getTime() - jobStarted.getTime()) / 3600000) : device.age_hours,
+    stale_after_hours: device.stale_after_hours,
+    run: {
+      run_id: device.last_run?.run_id || null,
+      status: device.last_run?.status || null,
+      scanner_version: device.last_run?.scanner_version || null,
+      received_at: device.last_run?.received_at || null,
+      completed_run_id: device.last_completed_run_id,
+      completed_received_at: device.last_completed_received_at
+    },
+    normalization_job: job ? {
+      status: job.status,
+      records_seen: job.records_seen || 0,
+      packages_seen: job.packages_seen || 0,
+      findings_seen: job.findings_seen || 0,
+      promoted_current: !!job.promoted_current,
+      error: safeNormalizationError(job.error),
+      started_at: job.started_at,
+      completed_at: job.completed_at
+    } : null
+  };
+}
+
+function attentionCounts(items: AttentionItem[]): object {
+  const reasons = Object.fromEntries(Object.keys(attentionSeverityByReason).map((reason) => [reason, 0])) as Record<AttentionReason, number>;
+  const counts = { total: items.length, critical: 0, warning: 0, reasons };
+  for (const item of items) {
+    counts[item.severity]++;
+    counts.reasons[item.reason]++;
+  }
+  return counts;
 }
 
 function formatHealthRow(row: AdminHealthRow, config: HealthConfig, now: Date): HealthDevice {
@@ -1946,6 +2168,7 @@ function formatHealthRow(row: AdminHealthRow, config: HealthConfig, now: Date): 
     stale_after_hours: staleAfterHours,
     age_hours: ageHours,
     last_completed_received_at: row.last_complete_received_at,
+    last_completed_run_id: row.last_complete_run_id,
     last_run: row.last_run_id ? {
       run_id: row.last_run_id,
       status: row.last_run_status,

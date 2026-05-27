@@ -47,6 +47,67 @@
 
       <section class="panel">
         <div class="panel-header">
+          <h2>Attention</h2>
+          <div class="filters">
+            <label>
+              Rows
+              <select id="attention-page-size">
+                <option value="10">10</option>
+                <option value="25">25</option>
+                <option value="50">50</option>
+                <option value="100">100</option>
+              </select>
+            </label>
+            <label>
+              Severity
+              <select id="attention-severity">
+                <option value="all">All</option>
+                <option value="critical">Critical</option>
+                <option value="warning">Warning</option>
+              </select>
+            </label>
+            <label>
+              Reason
+              <select id="attention-reason">
+                <option value="">All</option>
+                <option value="latest_run_not_complete">Run incomplete</option>
+                <option value="latest_complete_run_too_old">Run stale</option>
+                <option value="no_monitored_profile_run">No monitored run</option>
+                <option value="normalization_missing">Normalization missing</option>
+                <option value="normalization_error">Normalization error</option>
+                <option value="normalization_processing_stale">Normalization stale</option>
+                <option value="normalization_not_promoted">Normalization not promoted</option>
+              </select>
+            </label>
+          </div>
+        </div>
+        <div class="health-summary" aria-label="Attention summary">
+          <span>Total <strong id="attention-total">-</strong></span>
+          <span>Critical <strong id="attention-critical">-</strong></span>
+          <span>Warning <strong id="attention-warning">-</strong></span>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Severity</th>
+                <th>Device</th>
+                <th>Reason</th>
+                <th>Run</th>
+                <th>Normalization</th>
+                <th>Observed</th>
+              </tr>
+            </thead>
+            <tbody id="attention-body">
+              <tr><td colspan="6">Loading attention...</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <nav id="attention-pagination" class="pagination" aria-label="Attention pages"></nav>
+      </section>
+
+      <section class="panel">
+        <div class="panel-header">
           <h2>Health</h2>
           <p id="health-config" class="panel-note">baseline health loading</p>
         </div>

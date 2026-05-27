@@ -3,6 +3,7 @@ const packageViews = new Set(["package", "summary", "observations"]);
 const pageSizes = new Set([10, 25, 50, 100]);
 const pageSizeStorageKeys = {
   devicePageSize: "hive.devices.page.size",
+  attentionPageSize: "hive.attention.page.size",
   runPageSize: "hive.runs.page.size",
   inventoryPageSize: "hive.inventory.page.size",
   detailInventoryPageSize: "hive.detail.inventory.page.size",
@@ -18,11 +19,13 @@ const state = {
   autoRefreshTimer: 0,
   packageView: storedPackageView(),
   devicePageSize: storedPageSize("devicePageSize"),
+  attentionPageSize: storedPageSize("attentionPageSize"),
   runPageSize: storedPageSize("runPageSize"),
   inventoryPageSize: storedPageSize("inventoryPageSize"),
   detailInventoryPageSize: storedPageSize("detailInventoryPageSize"),
   normalizationPageSize: storedPageSize("normalizationPageSize"),
   devicePage: 1,
+  attentionPage: 1,
   runPage: 1,
   inventoryPage: 1,
   detailInventoryPage: 1,
@@ -35,6 +38,11 @@ const el = {
   lastRefresh: document.querySelector("#last-refresh"),
   error: document.querySelector("#error"),
   devicePageSize: document.querySelector("#device-page-size"),
+  attentionPageSize: document.querySelector("#attention-page-size"),
+  attentionSeverity: document.querySelector("#attention-severity"),
+  attentionReason: document.querySelector("#attention-reason"),
+  attentionBody: document.querySelector("#attention-body"),
+  attentionPagination: document.querySelector("#attention-pagination"),
   deviceStatus: document.querySelector("#device-status"),
   runStatus: document.querySelector("#run-status"),
   runProfile: document.querySelector("#run-profile"),
@@ -105,6 +113,7 @@ function storedPageSize(stateKey) {
 
 function syncPageSizeControls() {
   el.devicePageSize.value = String(state.devicePageSize);
+  el.attentionPageSize.value = String(state.attentionPageSize);
   el.runPageSize.value = String(state.runPageSize);
   el.inventoryPageSize.value = String(state.inventoryPageSize);
   el.detailInventoryPageSize.value = String(state.detailInventoryPageSize);
@@ -226,17 +235,21 @@ function applyUrlStateFromLocation() {
   const params = url.searchParams;
   state.selectedDeviceId = deviceIdFromPath(url.pathname);
   state.devicePageSize = pageSizeFromValue(params.get("device_page_size") || params.get("page_size"), storedPageSize("devicePageSize"));
+  state.attentionPageSize = pageSizeFromValue(params.get("attention_page_size") || params.get("page_size"), storedPageSize("attentionPageSize"));
   state.runPageSize = pageSizeFromValue(params.get("run_page_size") || params.get("page_size"), storedPageSize("runPageSize"));
   state.inventoryPageSize = pageSizeFromValue(params.get("inventory_page_size") || params.get("page_size"), storedPageSize("inventoryPageSize"));
   state.detailInventoryPageSize = pageSizeFromValue(params.get("detail_inventory_page_size") || params.get("page_size"), storedPageSize("detailInventoryPageSize"));
   state.normalizationPageSize = pageSizeFromValue(params.get("normalization_page_size") || params.get("page_size"), storedPageSize("normalizationPageSize"));
   syncPageSizeControls();
   state.devicePage = pageFromParams(params, "device_page");
+  state.attentionPage = pageFromParams(params, "attention_page");
   state.runPage = pageFromParams(params, "run_page");
   state.inventoryPage = pageFromParams(params, "inventory_page");
   state.detailInventoryPage = pageFromParams(params, "detail_inventory_page");
   state.normalizationPage = pageFromParams(params, "normalization_page");
   setSelectValue(el.deviceStatus, params.get("device_status") || "active", "active");
+  setSelectValue(el.attentionSeverity, params.get("attention_severity") || "all", "all");
+  setSelectValue(el.attentionReason, params.get("attention_reason") || "", "");
   setSelectValue(el.runStatus, params.get("run_status") || "", "");
   setSelectValue(el.normalizationStatus, params.get("normalization_status") || "", "");
   setSelectValue(el.normalizationPromoted, params.get("normalization_promoted") || "", "");
@@ -280,6 +293,10 @@ function currentAdminPath() {
   setPageSizeParam(params, "device_page_size", state.devicePageSize);
   setParamIfValue(params, "device_status", el.deviceStatus.value, "active");
   setPageParam(params, "device_page", state.devicePage);
+  setPageSizeParam(params, "attention_page_size", state.attentionPageSize);
+  setParamIfValue(params, "attention_severity", el.attentionSeverity.value, "all");
+  setParamIfValue(params, "attention_reason", el.attentionReason.value);
+  setPageParam(params, "attention_page", state.attentionPage);
   params.set("inventory_view", state.packageView);
   setParamIfValue(params, "package_query", el.packageQuery.value.trim());
   setParamIfValue(params, "ecosystem", el.packageEcosystem.value.trim());
@@ -380,6 +397,39 @@ async function loadOverview() {
   text("#metric-batches", formatNumber(overview.batches.total));
   text("#metric-records", `records ${formatNumber(overview.batches.records)}`);
   text("#metric-latest", formatTime(overview.runs.latest_received_at));
+}
+
+async function loadAttention() {
+  const params = new URLSearchParams({
+    limit: String(state.attentionPageSize),
+    offset: String(offsetForPage(state.attentionPage, state.attentionPageSize))
+  });
+  if (el.attentionSeverity.value && el.attentionSeverity.value !== "all") params.set("severity", el.attentionSeverity.value);
+  if (el.attentionReason.value) params.set("reason", el.attentionReason.value);
+  const data = await getJSON(`/v1/ui/admin/attention?${params.toString()}`);
+  state.attentionPage = data.page || state.attentionPage;
+  text("#attention-total", formatNumber(data.counts.total));
+  text("#attention-critical", formatNumber(data.counts.critical));
+  text("#attention-warning", formatNumber(data.counts.warning));
+  renderPagination(el.attentionPagination, data, "attentionPage");
+  if (data.attention.length === 0) {
+    el.attentionBody.innerHTML = '<tr><td colspan="6">No active devices need attention.</td></tr>';
+    return;
+  }
+  el.attentionBody.innerHTML = data.attention.map((item) => {
+    const run = item.run || {};
+    const normalization = item.normalization_job;
+    return `
+      <tr data-device-id="${escapeHtml(item.device_id)}">
+        <td>${statusBadge(item.severity)}</td>
+        <td title="${escapeHtml(item.device_id)}">${escapeHtml(shortId(item.device_id))}</td>
+        <td>${escapeHtml(reasonLabel(item.reason))}</td>
+        <td>${run.run_id ? `${escapeHtml(shortId(run.run_id))}<br><small>${escapeHtml(run.status || "-")} / ${escapeHtml(formatTime(run.received_at))}</small>` : "-"}</td>
+        <td>${normalization ? `${statusBadge(normalization.status)}<br><small>promoted ${escapeHtml(promotedLabel(normalization.promoted_current))}</small>` : "-"}</td>
+        <td>${escapeHtml(formatTime(item.observed_at))}</td>
+      </tr>
+    `;
+  }).join("");
 }
 
 async function loadHealth() {
@@ -726,7 +776,7 @@ async function loadDevicePackages(deviceId = state.selectedDeviceId) {
 async function refreshAll() {
   el.error.hidden = true;
   try {
-    await Promise.all([loadOverview(), loadHealth(), loadDevices(), loadPackages(), loadRuns(), loadNormalizationJobs()]);
+    await Promise.all([loadOverview(), loadAttention(), loadHealth(), loadDevices(), loadPackages(), loadRuns(), loadNormalizationJobs()]);
     el.lastRefresh.textContent = `Last refreshed ${new Date().toLocaleString()}`;
   } catch (error) {
     showError(error);
@@ -783,6 +833,17 @@ function clearPackageSelection(mode = "push") {
 
 el.refresh.addEventListener("click", refreshAll);
 el.devicePageSize.addEventListener("change", () => setPageSize("devicePageSize", "devicePage", el.devicePageSize, loadDevices));
+el.attentionPageSize.addEventListener("change", () => setPageSize("attentionPageSize", "attentionPage", el.attentionPageSize, loadAttention));
+el.attentionSeverity.addEventListener("change", () => {
+  state.attentionPage = 1;
+  syncUrlState("replace");
+  loadAttention();
+});
+el.attentionReason.addEventListener("change", () => {
+  state.attentionPage = 1;
+  syncUrlState("replace");
+  loadAttention();
+});
 el.deviceStatus.addEventListener("change", () => {
   state.devicePage = 1;
   syncUrlState("replace");
@@ -879,6 +940,10 @@ el.healthBody.addEventListener("click", (event) => {
   const row = event.target.closest("tr[data-device-id]");
   if (row) selectDevice(row.dataset.deviceId);
 });
+el.attentionBody.addEventListener("click", (event) => {
+  const row = event.target.closest("tr[data-device-id]");
+  if (row) selectDevice(row.dataset.deviceId);
+});
 el.packagesBody.addEventListener("click", (event) => {
   if (event.target.closest("details, summary, button, input, select, a")) return;
   const row = event.target.closest("tr[data-package-name]");
@@ -902,6 +967,10 @@ el.packageDetail.addEventListener("click", (event) => {
 el.devicesPagination.addEventListener("click", (event) => {
   const button = event.target.closest("button[data-page]");
   if (button) setPage("devicePage", button.dataset.page, loadDevices);
+});
+el.attentionPagination.addEventListener("click", (event) => {
+  const button = event.target.closest("button[data-page]");
+  if (button) setPage("attentionPage", button.dataset.page, loadAttention);
 });
 el.packagesPagination.addEventListener("click", (event) => {
   const button = event.target.closest("button[data-page]");
@@ -977,6 +1046,10 @@ function reasonLabel(value) {
     latest_complete_run_within_weekend_grace: "within weekend grace",
     latest_complete_run_too_old: "latest complete run is stale",
     latest_run_not_complete: "latest run needs attention",
-    no_monitored_profile_run: "no monitored run yet"
+    no_monitored_profile_run: "no monitored run yet",
+    normalization_missing: "normalization missing",
+    normalization_error: "normalization error",
+    normalization_processing_stale: "normalization processing stale",
+    normalization_not_promoted: "normalization not promoted"
   }[value] || value || "-";
 }

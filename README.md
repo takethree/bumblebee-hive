@@ -47,14 +47,15 @@ Device detail views are recoverable at `/admin/devices/<device-id>`. Package
 drill-down state is recoverable in the same admin route with query parameters
 such as `selected_package`, `selected_ecosystem`, `selected_profile`, and
 `selected_device`. The UI also preserves key filters in query parameters such
-as `device_status`, `inventory_view`, `package_query`, `ecosystem`, `profile`,
+as `device_status`, `attention_severity`, `attention_reason`,
+`inventory_view`, `package_query`, `ecosystem`, `profile`,
 `run_status`, `run_profile`, `normalization_status`,
 `normalization_promoted`, `normalization_device`, and `normalization_run`.
-Numbered table pages are recoverable through `device_page`, `inventory_page`,
-`run_page`, `normalization_page`, and `detail_inventory_page`. The
+Numbered table pages are recoverable through `device_page`, `attention_page`,
+`inventory_page`, `run_page`, `normalization_page`, and `detail_inventory_page`. The
 UI defaults to 10 rows per page and lets operators choose 10, 25, 50, or 100
 rows next to each paginated list. Non-default choices are recoverable through
-`device_page_size`, `inventory_page_size`, `run_page_size`,
+`device_page_size`, `attention_page_size`, `inventory_page_size`, `run_page_size`,
 `normalization_page_size`, and `detail_inventory_page_size`. Auto-refresh
 remains local browser state and is not encoded in the URL.
 
@@ -71,7 +72,7 @@ the protected Hive application. The UI routes validate the
 `Cf-Access-Jwt-Assertion` header against the Access JWKS before returning
 metadata.
 
-The UI shows overview totals, health, devices, device detail, runs, and
+The UI shows overview totals, attention, health, devices, device detail, runs, and
 metadata-only device lifecycle events. It does not expose raw inventory
 records, `summary_json`, R2 object keys, HMAC material, Access credentials,
 local usernames, SIDs, hostnames, or profile paths.
@@ -115,6 +116,36 @@ Disabled devices are excluded from health counts. Health responses contain
 aggregate counts and metadata only; they do not expose raw inventory,
 `summary_json`, R2 object keys, HMAC material, Access credentials, local
 usernames, SIDs, hostnames, or profile paths.
+
+### Operator attention
+
+The dashboard includes a top read-only attention queue backed by
+`GET /v1/ui/admin/attention`. Script/operator callers can use the matching
+`GET /v1/admin/attention` endpoint. The queue is server-computed from active
+devices, monitored-profile run health, and the latest normalization job for the
+latest complete monitored-profile run.
+
+Attention supports `severity=all|critical|warning`, `reason=<reason>`,
+`limit`, and `offset`. Responses include `config`, `counts`, `attention`,
+pagination metadata, and `filters`.
+
+| Variable | Default | Meaning |
+|---|---:|---|
+| `NORMALIZATION_PROCESSING_STALE_MINUTES` | `30` | Age threshold before an in-progress normalization job needs operator attention. |
+
+Attention reasons:
+
+- `latest_run_not_complete`: critical.
+- `latest_complete_run_too_old`: warning.
+- `no_monitored_profile_run`: warning.
+- `normalization_missing`: warning.
+- `normalization_error`: critical.
+- `normalization_processing_stale`: critical.
+- `normalization_not_promoted`: warning.
+
+Disabled devices are excluded. Attention responses are metadata-only and do not
+expose raw inventory, `summary_json`, R2 object keys, HMAC material, Access
+credentials, local usernames, SIDs, hostnames, or profile paths.
 
 ## Retention
 
@@ -277,6 +308,7 @@ $headers = @{
 Supported endpoints:
 
 - `GET /v1/admin/overview`
+- `GET /v1/admin/attention?severity=all|critical|warning&reason=<reason>&limit=10&offset=0`
 - `GET /v1/admin/devices?status=active|disabled|all&limit=50&offset=0`
 - `GET /v1/admin/devices/<device-id>`
 - `GET /v1/admin/runs?device_id=<device-id>&status=complete&profile=baseline&limit=50&offset=0`
@@ -305,6 +337,81 @@ Example response:
     "latest_received_at": "2026-05-26T19:45:00.000Z"
   },
   "batches": { "total": 36, "records": 12420 }
+}
+```
+
+Example attention queue:
+
+```powershell
+Invoke-RestMethod `
+  -Uri "https://hive.example.com/v1/admin/attention?severity=critical&limit=10&offset=0" `
+  -Headers $headers
+```
+
+Example response:
+
+```json
+{
+  "config": {
+    "profile": "baseline",
+    "expected_cadence_hours": 6,
+    "stale_hours": 24,
+    "weekend_grace_hours": 72,
+    "normalization_processing_stale_minutes": 30
+  },
+  "counts": {
+    "total": 3,
+    "critical": 1,
+    "warning": 2,
+    "reasons": {
+      "latest_run_not_complete": 1,
+      "latest_complete_run_too_old": 0,
+      "no_monitored_profile_run": 0,
+      "normalization_missing": 1,
+      "normalization_error": 1,
+      "normalization_processing_stale": 0,
+      "normalization_not_promoted": 0
+    }
+  },
+  "attention": [
+    {
+      "device_id": "device-redacted",
+      "severity": "critical",
+      "reason": "normalization_error",
+      "profile": "baseline",
+      "observed_at": "2026-05-27T10:00:01.000Z",
+      "age_hours": 0.1,
+      "stale_after_hours": 24,
+      "run": {
+        "run_id": "run-redacted",
+        "status": "complete",
+        "scanner_version": "v0.1.0",
+        "received_at": "2026-05-27T09:55:00.000Z",
+        "completed_run_id": "run-redacted",
+        "completed_received_at": "2026-05-27T09:55:00.000Z"
+      },
+      "normalization_job": {
+        "status": "error",
+        "records_seen": 0,
+        "packages_seen": 0,
+        "findings_seen": 0,
+        "promoted_current": false,
+        "error": "[redacted-path]",
+        "started_at": "2026-05-27T10:00:00.000Z",
+        "completed_at": "2026-05-27T10:00:01.000Z"
+      }
+    }
+  ],
+  "limit": 10,
+  "offset": 0,
+  "total": 1,
+  "page": 1,
+  "page_count": 1,
+  "has_more": false,
+  "filters": {
+    "severity": "critical",
+    "reason": null
+  }
 }
 ```
 
@@ -524,11 +631,11 @@ A successful `CheckOnly` result proves:
 - local config, local DPAPI secrets, wrapper script, and binary are present;
 - `bumblebee.exe selftest` exits `0`;
 - the scheduled task exists and its last result is `0`;
-- Hive admin overview, device, run, device-detail, and normalization-job
+- Hive admin overview, attention, device, run, device-detail, and normalization-job
   metadata endpoints return `200`;
 - admin responses use `Cache-Control: no-store`;
 - `/admin/` serves the dashboard shell and `/admin/app.js` contains the
-  normalization UI route;
+  attention and normalization UI routes;
 - when `-WorkersDevUrl` is supplied, the workers.dev route returns `404`;
 - forbidden raw-data fields are absent from admin responses.
 

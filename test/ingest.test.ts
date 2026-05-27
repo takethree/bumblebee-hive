@@ -138,6 +138,13 @@ class MemoryStmt {
         .filter((run) => run.device_id === String(this.values[0]) && run.run_id === String(this.values[1]) && run.status === "complete")
         .sort((left, right) => right.received_at.localeCompare(left.received_at))[0] || null) as T | null;
     }
+    if (this.sql.startsWith("SELECT") && this.sql.includes("FROM normalization_jobs") && this.sql.includes("ORDER BY started_at DESC LIMIT 1")) {
+      const deviceID = String(this.values[0]);
+      const runID = String(this.values[1]);
+      return (this.db.normalizationJobRows()
+        .filter((job) => job.device_id === deviceID && job.run_id === runID)
+        .sort((left, right) => right.started_at.localeCompare(left.started_at))[0] || null) as T | null;
+    }
     return null;
   }
 
@@ -841,6 +848,7 @@ class MemoryD1 {
     last_run_status: string | null;
     last_run_scanner_version: string | null;
     last_run_received_at: string | null;
+    last_complete_run_id: string | null;
     last_complete_received_at: string | null;
   }> {
     const runs = this.runRows();
@@ -859,6 +867,7 @@ class MemoryD1 {
           last_run_status: lastRun?.status || null,
           last_run_scanner_version: lastRun?.scanner_version || null,
           last_run_received_at: lastRun?.received_at || null,
+          last_complete_run_id: lastComplete?.run_id || null,
           last_complete_received_at: lastComplete?.received_at || null
         };
       });
@@ -1681,6 +1690,110 @@ describe("bumblebee hive worker", () => {
       device_id: "device-ui",
       status: "complete",
       promoted_current: true
+    })]);
+    expect(forbiddenVisibilityFields(body)).toEqual([]);
+  });
+
+  it("returns metadata-only operator attention with health and normalization reasons", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-05-27T10:00:00.000Z"));
+    const env = makeEnv();
+    env.HEALTH_STALE_HOURS = "1";
+    env.NORMALIZATION_PROCESSING_STALE_MINUTES = "30";
+
+    await ingestSummary(env, "device-partial", "secret-partial", "run-partial", "baseline", "partial");
+    await ingestSummary(env, "device-stale", "secret-stale", "run-stale");
+    await ingestSummary(env, "device-missing", "secret-missing", "run-missing");
+    await ingestSummary(env, "device-error", "secret-error", "run-error");
+    await ingestSummary(env, "device-processing", "secret-processing", "run-processing");
+    await ingestSummary(env, "device-not-promoted", "secret-not-promoted", "run-not-promoted");
+    await ingestSummary(env, "device-good", "secret-good", "run-good");
+    await ingestSummary(env, "device-disabled", "secret-disabled", "run-disabled");
+    setRunReceivedAt(env, "run-stale", "2026-05-27T08:00:00.000Z");
+    env.DB.devices.get("device-disabled")!.disabled_at = "2026-05-27T09:00:00.000Z";
+    seedNormalizationJob(env, {
+      batch_id: "batch-error",
+      device_id: "device-error",
+      run_id: "run-error",
+      status: "error",
+      error: "failed reading C:\\Users\\operator\\AppData\\Local\\Temp\\payload.ndjson.gz",
+      started_at: "2026-05-27T09:50:00.000Z",
+      completed_at: "2026-05-27T09:51:00.000Z"
+    });
+    seedNormalizationJob(env, {
+      batch_id: "batch-processing",
+      device_id: "device-processing",
+      run_id: "run-processing",
+      status: "processing",
+      started_at: "2026-05-27T09:00:00.000Z"
+    });
+    seedNormalizationJob(env, {
+      batch_id: "batch-not-promoted",
+      device_id: "device-not-promoted",
+      run_id: "run-not-promoted",
+      status: "complete",
+      promoted_current: 0,
+      completed_at: "2026-05-27T09:55:00.000Z",
+      started_at: "2026-05-27T09:54:00.000Z"
+    });
+    seedNormalizationJob(env, {
+      batch_id: "batch-good",
+      device_id: "device-good",
+      run_id: "run-good",
+      status: "complete",
+      promoted_current: 1,
+      completed_at: "2026-05-27T09:58:00.000Z",
+      started_at: "2026-05-27T09:57:00.000Z"
+    });
+
+    const response = await worker.fetch(new Request("https://hive.example.test/v1/admin/attention?severity=critical&limit=2&offset=0", {
+      headers: adminHeaders(env)
+    }), env);
+    const body = await response.json() as {
+      counts: { total: number; critical: number; warning: number; reasons: Record<string, number> };
+      attention: Array<{ device_id: string; severity: string; reason: string; normalization_job: { error?: string | null } | null }>;
+      total: number;
+      limit: number;
+      page: number;
+      has_more: boolean;
+      config: { normalization_processing_stale_minutes: number };
+    };
+    const reasons = new Set(body.attention.map((item) => item.reason));
+
+    expect(response.status).toBe(200);
+    expect(body.config.normalization_processing_stale_minutes).toBe(30);
+    expect(body.counts.reasons.latest_run_not_complete).toBe(1);
+    expect(body.counts.reasons.latest_complete_run_too_old).toBe(1);
+    expect(body.counts.reasons.normalization_missing).toBeGreaterThanOrEqual(1);
+    expect(body.counts.reasons.normalization_error).toBe(1);
+    expect(body.counts.reasons.normalization_processing_stale).toBe(1);
+    expect(body.counts.reasons.normalization_not_promoted).toBe(1);
+    expect(body.counts.critical).toBe(3);
+    expect(body.total).toBe(3);
+    expect(body.limit).toBe(2);
+    expect(body.page).toBe(1);
+    expect(body.has_more).toBe(true);
+    expect(reasons.size).toBe(2);
+    expect([...reasons].every((reason) => ["latest_run_not_complete", "normalization_error", "normalization_processing_stale"].includes(reason))).toBe(true);
+    expect(JSON.stringify(body)).not.toContain("device-disabled");
+    expect(JSON.stringify(body)).not.toContain("Users");
+    expect(forbiddenVisibilityFields(body)).toEqual([]);
+  });
+
+  it("returns UI attention metadata with Access JWT and no admin token", async () => {
+    const env = makeEnv();
+    await ingestSummary(env, "device-ui-attention", "secret-ui-attention", "run-ui-attention", "baseline", "partial");
+    const token = await accessJWT(env);
+
+    const response = await worker.fetch(new Request("https://hive.example.test/v1/ui/admin/attention?reason=latest_run_not_complete", {
+      headers: { "Cf-Access-Jwt-Assertion": token }
+    }), env);
+    const body = await response.json() as { attention: Array<{ device_id: string; reason: string }> };
+
+    expect(response.status).toBe(200);
+    expect(body.attention).toEqual([expect.objectContaining({
+      device_id: "device-ui-attention",
+      reason: "latest_run_not_complete"
     })]);
     expect(forbiddenVisibilityFields(body)).toEqual([]);
   });
