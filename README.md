@@ -61,6 +61,41 @@ devices, device detail, and runs, but it does not expose raw inventory records,
 `summary_json`, R2 object keys, HMAC material, Access credentials, local user
 names, SIDs, hostnames, or profile paths.
 
+## Retention
+
+Hive stores accepted raw batches in R2 and metadata in D1. A scheduled Worker
+cleanup runs every 6 hours and removes data older than the configured retention
+window. The default retention window is 30 days; set `RETENTION_DAYS=0` to
+disable cleanup. `RETENTION_DELETE_LIMIT` bounds the number of batch/run rows
+processed in one cleanup pass and defaults to 100.
+
+Cleanup deletes the R2 raw object before deleting the matching D1 `batches` row.
+If an R2 delete fails, that D1 row is left in place so the next pass can retry.
+Old `runs` rows are deleted only after they are older than the cutoff and have
+no remaining batch rows.
+
+Run a dry-run cleanup check with admin credentials:
+
+```powershell
+Invoke-RestMethod `
+  -Method Post `
+  -Uri "https://hive.example.com/v1/admin/retention/run?dry_run=true" `
+  -Headers $headers
+```
+
+Run a manual cleanup:
+
+```powershell
+Invoke-RestMethod `
+  -Method Post `
+  -Uri "https://hive.example.com/v1/admin/retention/run" `
+  -Headers $headers
+```
+
+Retention responses contain aggregate counts and the cutoff timestamp only. They
+do not expose raw inventory, `summary_json`, R2 object keys, HMAC material,
+Access credentials, local usernames, SIDs, hostnames, or profile paths.
+
 ## Windows Bootstrapper
 
 The self-service installer downloads Bumblebee, verifies the release checksum,

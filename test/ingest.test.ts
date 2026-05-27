@@ -9,6 +9,10 @@ class MemoryR2 {
   async put(key: string, value: Uint8Array): Promise<void> {
     this.objects.set(key, value);
   }
+
+  async delete(key: string): Promise<void> {
+    this.objects.delete(key);
+  }
 }
 
 class MemoryQueue {
@@ -86,6 +90,26 @@ class MemoryStmt {
   }
 
   async all<T>(): Promise<{ results: T[] }> {
+    if (this.sql.startsWith("SELECT batch_id, object_key")) {
+      const cutoff = String(this.values[0]);
+      const limit = Number(this.values[1]);
+      const rows = this.db.batchRows()
+        .filter((row) => row.received_at < cutoff)
+        .sort((left, right) => left.received_at.localeCompare(right.received_at))
+        .slice(0, limit);
+      return { results: rows.map((row) => ({ batch_id: row.batch_id, object_key: row.object_key })) as T[] };
+    }
+    if (this.sql.includes("FROM runs r") && this.sql.includes("NOT EXISTS")) {
+      const cutoff = String(this.values[0]);
+      const limit = Number(this.values[1]);
+      const batches = this.db.batchRows();
+      const rows = this.db.runRows()
+        .filter((run) => run.received_at < cutoff)
+        .filter((run) => !batches.some((batch) => batch.device_id === run.device_id && batch.run_id === run.run_id))
+        .sort((left, right) => left.received_at.localeCompare(right.received_at))
+        .slice(0, limit);
+      return { results: rows.map((row) => ({ device_id: row.device_id, profile: row.profile, run_id: row.run_id })) as T[] };
+    }
     if (this.sql.includes("FROM devices d")) {
       let rows = this.db.adminDeviceRows();
       if (this.sql.includes("WHERE d.disabled_at IS NULL")) {
@@ -136,6 +160,27 @@ class MemoryStmt {
         return { success: true, meta: { duration: 0, changes: 1 } } as D1Result;
       }
       return { success: true, meta: { duration: 0, changes: 0 } } as D1Result;
+    } else if (this.sql.startsWith("DELETE FROM batches")) {
+      const ids = new Set(this.values.map(String));
+      const before = this.db.batches.length;
+      this.db.batches = this.db.batches.filter((batch) => !ids.has(String(batch[0])));
+      return { success: true, meta: { duration: 0, changes: before - this.db.batches.length } } as D1Result;
+    } else if (this.sql.startsWith("DELETE FROM runs")) {
+      const triples: Array<{ device_id: string; profile: string; run_id: string }> = [];
+      for (let i = 0; i < this.values.length; i += 3) {
+        triples.push({
+          device_id: String(this.values[i]),
+          profile: String(this.values[i + 1]),
+          run_id: String(this.values[i + 2])
+        });
+      }
+      const before = this.db.runs.length;
+      this.db.runs = this.db.runs.filter((run) => !triples.some((triple) =>
+        triple.device_id === String(run[0]) &&
+        triple.profile === String(run[1]) &&
+        triple.run_id === String(run[2])
+      ));
+      return { success: true, meta: { duration: 0, changes: before - this.db.runs.length } } as D1Result;
     }
     return { success: true, meta: { duration: 0 } } as D1Result;
   }
@@ -165,11 +210,13 @@ class MemoryD1 {
     return new MemoryStmt(this, sql);
   }
 
-  batchRows(): Array<{ device_id: string; run_id: string; received_at: string; record_count: number }> {
+  batchRows(): Array<{ batch_id: string; device_id: string; run_id: string; received_at: string; object_key: string; record_count: number }> {
     return this.batches.map((batch) => ({
+      batch_id: String(batch[0]),
       device_id: String(batch[1]),
       run_id: String(batch[2]),
       received_at: String(batch[3]),
+      object_key: String(batch[5]),
       record_count: Number(batch[7] || 0)
     }));
   }
@@ -350,6 +397,19 @@ async function ingestSummary(env: Env & { DB: MemoryD1 }, deviceID: string, hmac
     "X-Inventory-Device-Id": deviceID
   }), env);
   expect(response.status).toBe(200);
+}
+
+function setRunReceivedAt(env: Env & { DB: MemoryD1 }, runID: string, receivedAt: string): void {
+  for (const batch of env.DB.batches) {
+    if (String(batch[2]) === runID) {
+      batch[3] = receivedAt;
+    }
+  }
+  for (const run of env.DB.runs) {
+    if (String(run[2]) === runID) {
+      run[5] = receivedAt;
+    }
+  }
 }
 
 describe("bumblebee hive worker", () => {
@@ -607,6 +667,60 @@ describe("bumblebee hive worker", () => {
     expect(await missing.json()).toEqual({ error: "missing_access_jwt" });
     expect(wrongAudience.status).toBe(403);
     expect(await wrongAudience.json()).toEqual({ error: "invalid_access_jwt" });
+  });
+
+  it("runs admin retention dry-run and cleanup without exposing raw object keys", async () => {
+    const env = makeEnv();
+    env.RETENTION_DAYS = "7";
+    env.RETENTION_DELETE_LIMIT = "10";
+    await ingestSummary(env, "device-1", "device-secret", "run-old");
+    await ingestSummary(env, "device-1", "device-secret", "run-new");
+    setRunReceivedAt(env, "run-old", "2026-01-01T00:00:00.000Z");
+    const oldObjectKey = env.DB.batchRows().find((batch) => batch.run_id === "run-old")?.object_key;
+    expect(oldObjectKey).toBeTruthy();
+    expect(env.RAW_BATCHES.objects.has(oldObjectKey!)).toBe(true);
+
+    const dryRunResponse = await worker.fetch(new Request("https://hive.example.test/v1/admin/retention/run?dry_run=true", {
+      method: "POST",
+      headers: adminHeaders(env)
+    }), env);
+    const dryRunBody = await dryRunResponse.json() as { batches: { candidates: number; deleted: number }; runs: { deleted: number } };
+
+    expect(dryRunResponse.status).toBe(200);
+    expect(dryRunBody.batches).toMatchObject({ candidates: 1, deleted: 0 });
+    expect(dryRunBody.runs.deleted).toBe(0);
+    expect(env.RAW_BATCHES.objects.has(oldObjectKey!)).toBe(true);
+    expect(forbiddenVisibilityFields(dryRunBody)).toEqual([]);
+
+    const cleanupResponse = await worker.fetch(new Request("https://hive.example.test/v1/admin/retention/run", {
+      method: "POST",
+      headers: adminHeaders(env)
+    }), env);
+    const cleanupBody = await cleanupResponse.json() as { batches: { deleted: number }; raw_objects: { deleted: number; delete_errors: number }; runs: { deleted: number } };
+
+    expect(cleanupResponse.status).toBe(200);
+    expect(cleanupBody.batches.deleted).toBe(1);
+    expect(cleanupBody.raw_objects).toMatchObject({ deleted: 1, delete_errors: 0 });
+    expect(cleanupBody.runs.deleted).toBe(1);
+    expect(env.RAW_BATCHES.objects.has(oldObjectKey!)).toBe(false);
+    expect(env.DB.batchRows().map((batch) => batch.run_id)).toEqual(["run-new"]);
+    expect(env.DB.runRows().map((run) => run.run_id)).toEqual(["run-new"]);
+    expect(forbiddenVisibilityFields(cleanupBody)).toEqual([]);
+  });
+
+  it("rejects retention cleanup without the admin token", async () => {
+    const env = makeEnv();
+
+    const response = await worker.fetch(new Request("https://hive.example.test/v1/admin/retention/run", {
+      method: "POST",
+      headers: {
+        "CF-Access-Client-Id": "access-id",
+        "CF-Access-Client-Secret": "access-secret"
+      }
+    }), env);
+
+    expect(response.status).toBe(401);
+    expect(await response.json()).toEqual({ error: "invalid_admin_token" });
   });
 
   it("keeps token-based admin routes separate from browser UI routes", async () => {

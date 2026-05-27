@@ -14,6 +14,8 @@ export interface Env {
   NORMALIZE_QUEUE?: Queue;
   MAX_BODY_BYTES?: string;
   TIMESTAMP_SKEW_SECONDS?: string;
+  RETENTION_DAYS?: string;
+  RETENTION_DELETE_LIMIT?: string;
 }
 
 interface InventoryRecord {
@@ -74,6 +76,17 @@ interface AdminRunRow {
   record_count: number | null;
 }
 
+interface RetentionBatchRow {
+  batch_id: string;
+  object_key: string;
+}
+
+interface RetentionRunRow {
+  device_id: string;
+  profile: string;
+  run_id: string;
+}
+
 interface ValidatedRecords {
   runID: string;
   summary: InventoryRecord | null;
@@ -88,6 +101,8 @@ const accessJWTHeader = "Cf-Access-Jwt-Assertion";
 const adminTokenHeader = "X-Hive-Admin-Token";
 const defaultMaxBodyBytes = 5 * 1024 * 1024;
 const defaultTimestampSkewSeconds = 300;
+const defaultRetentionDays = 30;
+const defaultRetentionDeleteLimit = 100;
 const accessJWKSByURL = new Map<string, ReturnType<typeof createRemoteJWKSet>>();
 
 export default {
@@ -112,6 +127,9 @@ export default {
       const disableMatch = url.pathname.match(/^\/v1\/admin\/devices\/([^/]+)\/disable$/);
       if (request.method === "POST" && disableMatch) {
         return await disableDevice(request, env, disableMatch[1]);
+      }
+      if (request.method === "POST" && url.pathname === "/v1/admin/retention/run") {
+        return await runRetentionAdmin(request, env, url);
       }
       if (request.method === "GET" && url.pathname === "/v1/admin/overview") {
         return await adminOverview(request, env);
@@ -145,6 +163,10 @@ export default {
       const status = error instanceof HttpError ? error.status : 500;
       return json({ error: message }, status);
     }
+  },
+
+  async scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
+    ctx.waitUntil(runRetention(env, { dryRun: false }));
   }
 };
 
@@ -263,6 +285,108 @@ async function disableDevice(request: Request, env: Env, rawDeviceID: string): P
   }
 
   return json({ ok: true, device_id: deviceID, disabled_at: disabledAt });
+}
+
+async function runRetentionAdmin(request: Request, env: Env, url: URL): Promise<Response> {
+  requireAdminRequest(request, env);
+  const dryRun = ["1", "true", "yes"].includes((url.searchParams.get("dry_run") || "").toLowerCase());
+  return adminJson(await runRetention(env, { dryRun }));
+}
+
+async function runRetention(env: Env, options: { dryRun: boolean }): Promise<object> {
+  const days = nonNegativeInt(env.RETENTION_DAYS, defaultRetentionDays);
+  const limit = positiveInt(env.RETENTION_DELETE_LIMIT, defaultRetentionDeleteLimit);
+  if (days === 0) {
+    return {
+      ok: true,
+      enabled: false,
+      dry_run: options.dryRun,
+      retention_days: days,
+      limit
+    };
+  }
+
+  const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+  const oldBatches = await allRows<RetentionBatchRow>(
+    env.DB.prepare(
+      "SELECT batch_id, object_key FROM batches WHERE received_at < ? ORDER BY received_at ASC LIMIT ?"
+    ).bind(cutoff, limit)
+  );
+
+  const deletedBatchIDs: string[] = [];
+  let rawObjectsDeleted = 0;
+  let rawObjectDeleteErrors = 0;
+  if (!options.dryRun) {
+    for (const batch of oldBatches) {
+      try {
+        await env.RAW_BATCHES.delete(batch.object_key);
+        rawObjectsDeleted++;
+        deletedBatchIDs.push(batch.batch_id);
+      } catch {
+        rawObjectDeleteErrors++;
+      }
+    }
+    await deleteBatchesByID(env, deletedBatchIDs);
+  }
+
+  const runLimit = options.dryRun ? limit : Math.max(1, limit - deletedBatchIDs.length);
+  const orphanedRuns = await allRows<RetentionRunRow>(
+    env.DB.prepare(
+      `SELECT r.device_id, r.profile, r.run_id
+       FROM runs r
+       WHERE r.received_at < ?
+         AND NOT EXISTS (
+           SELECT 1 FROM batches b
+           WHERE b.device_id = r.device_id AND b.run_id = r.run_id
+         )
+       ORDER BY r.received_at ASC
+       LIMIT ?`
+    ).bind(cutoff, runLimit)
+  );
+
+  let runsDeleted = 0;
+  if (!options.dryRun) {
+    runsDeleted = await deleteRunsByID(env, orphanedRuns);
+  }
+
+  return {
+    ok: true,
+    enabled: true,
+    dry_run: options.dryRun,
+    retention_days: days,
+    cutoff_received_before: cutoff,
+    limit,
+    batches: {
+      candidates: oldBatches.length,
+      deleted: options.dryRun ? 0 : deletedBatchIDs.length
+    },
+    raw_objects: {
+      deleted: options.dryRun ? 0 : rawObjectsDeleted,
+      delete_errors: options.dryRun ? 0 : rawObjectDeleteErrors
+    },
+    runs: {
+      candidates: orphanedRuns.length,
+      deleted: options.dryRun ? 0 : runsDeleted
+    }
+  };
+}
+
+async function deleteBatchesByID(env: Env, batchIDs: string[]): Promise<void> {
+  if (batchIDs.length === 0) {
+    return;
+  }
+  const placeholders = batchIDs.map(() => "?").join(", ");
+  await env.DB.prepare(`DELETE FROM batches WHERE batch_id IN (${placeholders})`).bind(...batchIDs).run();
+}
+
+async function deleteRunsByID(env: Env, runs: RetentionRunRow[]): Promise<number> {
+  if (runs.length === 0) {
+    return 0;
+  }
+  const clauses = runs.map(() => "(device_id = ? AND profile = ? AND run_id = ?)").join(" OR ");
+  const values = runs.flatMap((run) => [run.device_id, run.profile, run.run_id]);
+  const result = await env.DB.prepare(`DELETE FROM runs WHERE ${clauses}`).bind(...values).run();
+  return typeof result.meta?.changes === "number" ? result.meta.changes : runs.length;
 }
 
 async function adminOverview(request: Request, env: Env): Promise<Response> {
@@ -702,6 +826,14 @@ function positiveInt(value: string | undefined, fallback: number): number {
   }
   const parsed = Number.parseInt(value, 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function nonNegativeInt(value: string | undefined, fallback: number): number {
+  if (!value) {
+    return fallback;
+  }
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
 }
 
 function concatBytes(a: Uint8Array, b: Uint8Array): Uint8Array {
