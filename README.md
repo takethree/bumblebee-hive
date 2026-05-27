@@ -32,6 +32,9 @@ wrangler d1 migrations apply bumblebee-hive --local
 
 Production deployment requires real Cloudflare resource IDs and secrets in `wrangler.toml` / Wrangler secrets.
 
+For a sequenced per-user Windows developer pilot, use
+[docs/developer-rollout-runbook.md](docs/developer-rollout-runbook.md).
+
 ## Windows Bootstrapper
 
 The self-service installer downloads Bumblebee, verifies the release checksum,
