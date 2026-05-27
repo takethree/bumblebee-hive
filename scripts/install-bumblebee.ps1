@@ -117,7 +117,19 @@ function Invoke-HiveEnroll {
     "CF-Access-Client-Secret" = $ClientSecret
     "X-Hive-Enroll-Token" = $Token
   }
-  Invoke-RestMethod -Method Post -Uri "$($BaseUrl.TrimEnd('/'))/v1/enroll" -Headers $headers -Body "{}" -ContentType "application/json"
+  $response = Invoke-WebRequest -UseBasicParsing -Method Post -Uri "$($BaseUrl.TrimEnd('/'))/v1/enroll" -Headers $headers -Body "{}" -ContentType "application/json"
+  $contentType = [string]$response.Headers["Content-Type"]
+  if ($contentType -notmatch "application/json") {
+    throw "Hive enrollment did not return JSON. Check that the Cloudflare Access application has a Service Auth policy for this service token."
+  }
+  $body = $response.Content | ConvertFrom-Json
+  if (-not $body.PSObject.Properties["device_id"] -or -not $body.PSObject.Properties["hmac_key"]) {
+    throw "Hive enrollment response was missing device_id or hmac_key."
+  }
+  if (-not $body.PSObject.Properties["ingest_path"]) {
+    $body | Add-Member -NotePropertyName "ingest_path" -NotePropertyValue "/v1/ingest"
+  }
+  $body
 }
 
 function Write-RunScript {
