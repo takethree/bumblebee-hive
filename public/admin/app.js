@@ -19,6 +19,10 @@ const el = {
   detailTitle: document.querySelector("#detail-title"),
   detailSummary: document.querySelector("#detail-summary"),
   detailRunsBody: document.querySelector("#detail-runs-body"),
+  detailEventsBody: document.querySelector("#detail-events-body"),
+  lifecycleReason: document.querySelector("#lifecycle-reason"),
+  disableDevice: document.querySelector("#disable-device"),
+  enableDevice: document.querySelector("#enable-device"),
   clearDevice: document.querySelector("#clear-device")
 };
 
@@ -74,6 +78,23 @@ async function getJSON(path) {
     throw new Error(body.error || `Request failed with ${response.status}`);
   }
   return response.json();
+}
+
+async function postJSON(path, body) {
+  const response = await fetch(path, {
+    method: "POST",
+    headers: {
+      Accept: "application/json",
+      "Content-Type": "application/json"
+    },
+    credentials: "same-origin",
+    body: JSON.stringify(body)
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(data.error || `Request failed with ${response.status}`);
+  }
+  return data;
 }
 
 async function loadOverview() {
@@ -163,6 +184,18 @@ async function loadDeviceDetail(deviceId) {
     ["Batches", formatNumber(data.device.batch_count)],
     ["Records", formatNumber(data.device.record_count)]
   ].map(([label, value]) => `<div><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`).join("");
+  el.disableDevice.hidden = data.device.status !== "active";
+  el.enableDevice.hidden = data.device.status !== "disabled";
+  el.detailEventsBody.innerHTML = (data.lifecycle_events || []).length === 0
+    ? '<tr><td colspan="4">No lifecycle events.</td></tr>'
+    : data.lifecycle_events.map((event) => `
+      <tr>
+        <td>${statusBadge(event.action)}</td>
+        <td>${escapeHtml(event.actor_id || event.actor_type || "-")}</td>
+        <td>${escapeHtml(event.reason || "-")}</td>
+        <td>${escapeHtml(formatTime(event.created_at))}</td>
+      </tr>
+    `).join("");
   el.detailRunsBody.innerHTML = data.recent_runs.length === 0
     ? '<tr><td colspan="6">No recent runs.</td></tr>'
     : data.recent_runs.map((run) => `
@@ -198,6 +231,8 @@ el.clearDevice.addEventListener("click", () => {
   el.detail.hidden = true;
   loadRuns();
 });
+el.disableDevice.addEventListener("click", () => lifecycleAction("disable"));
+el.enableDevice.addEventListener("click", () => lifecycleAction("enable"));
 el.devicesBody.addEventListener("click", (event) => {
   const row = event.target.closest("tr[data-device-id]");
   if (row) loadDeviceDetail(row.dataset.deviceId);
@@ -212,6 +247,30 @@ el.autoRefresh.addEventListener("change", () => {
 });
 
 refreshAll();
+
+async function lifecycleAction(action) {
+  if (!state.selectedDeviceId) return;
+  const reason = el.lifecycleReason.value.trim();
+  if (!reason) {
+    el.error.textContent = "Reason is required.";
+    el.error.hidden = false;
+    el.lifecycleReason.focus();
+    return;
+  }
+  if (!confirm(`${action === "disable" ? "Disable" : "Enable"} this device?`)) {
+    return;
+  }
+  el.error.hidden = true;
+  try {
+    await postJSON(`/v1/ui/admin/devices/${encodeURIComponent(state.selectedDeviceId)}/${action}`, { reason });
+    el.lifecycleReason.value = "";
+    await Promise.all([loadOverview(), loadHealth(), loadDevices(), loadDeviceDetail(state.selectedDeviceId)]);
+    el.lastRefresh.textContent = `Last refreshed ${new Date().toLocaleString()}`;
+  } catch (error) {
+    el.error.textContent = error instanceof Error ? error.message : "Unable to update device.";
+    el.error.hidden = false;
+  }
+}
 
 function reasonLabel(value) {
   return {

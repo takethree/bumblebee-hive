@@ -173,5 +173,8 @@ powershell -NoProfile -ExecutionPolicy Bypass `
   -TaskName "Bumblebee Baseline Pilot"
 ```
 
-Remote revocation is separate. Disable the Hive device through the admin
-endpoint or an operator-run D1 update as documented in the Hive README.
+Remote lifecycle control is separate. Disable the Hive device through the
+script admin endpoint or the Hive admin UI as documented in the Hive README.
+Use a short audit reason. Re-enable is available for mistakes or returning
+devices; neither action deletes local state, raw batches, runs, or HMAC
+material.

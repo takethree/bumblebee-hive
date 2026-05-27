@@ -37,7 +37,7 @@ For a sequenced per-user Windows developer pilot, use
 
 ## Admin UI
 
-Hive serves a read-only operator dashboard at `/admin/`. The dashboard uses
+Hive serves an operator dashboard at `/admin/`. The dashboard uses
 Cloudflare Access for browser authentication and calls same-origin
 `/v1/ui/admin/*` metadata routes. Browser code does not store or send
 `X-Hive-Admin-Token`; that token remains limited to script/operator API calls
@@ -56,10 +56,22 @@ the protected Hive application. The UI routes validate the
 `Cf-Access-Jwt-Assertion` header against the Access JWKS before returning
 metadata.
 
-The UI is intentionally read-only in this phase. It shows overview totals,
-devices, device detail, and runs, but it does not expose raw inventory records,
-`summary_json`, R2 object keys, HMAC material, Access credentials, local user
-names, SIDs, hostnames, or profile paths.
+The UI shows overview totals, health, devices, device detail, runs, and
+metadata-only device lifecycle events. It does not expose raw inventory
+records, `summary_json`, R2 object keys, HMAC material, Access credentials,
+local usernames, SIDs, hostnames, or profile paths.
+
+Device lifecycle write actions in the UI require an additional Hive-managed
+allowlist after Access login:
+
+```powershell
+npx wrangler secret put UI_ADMIN_ACTION_EMAILS
+npx wrangler secret put UI_ADMIN_ACTION_DOMAINS
+```
+
+Both values are comma-separated. `UI_ADMIN_ACTION_EMAILS` matches exact email
+addresses and `UI_ADMIN_ACTION_DOMAINS` matches email domains. If neither is
+configured, UI lifecycle write routes return `403`.
 
 ### Operator health
 
@@ -183,11 +195,12 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-bumblebee.
   -TaskName "Bumblebee Baseline Pilot"
 ```
 
-## Device Revocation
+## Device Lifecycle
 
-Hive can disable an enrolled device without changing the local installer state.
-Set `ADMIN_TOKEN` as a Worker secret and call the admin endpoint through the
-same Cloudflare Access Service Auth gate used by enroll and ingest:
+Hive can disable or enable an enrolled device without changing the local
+installer state. Set `ADMIN_TOKEN` as a Worker secret and call the admin
+endpoint through the same Cloudflare Access Service Auth gate used by enroll
+and ingest:
 
 ```powershell
 Invoke-WebRequest -Method Post `
@@ -196,13 +209,36 @@ Invoke-WebRequest -Method Post `
     "CF-Access-Client-Id" = $env:BUMBLEBEE_HIVE_ACCESS_CLIENT_ID
     "CF-Access-Client-Secret" = $env:BUMBLEBEE_HIVE_ACCESS_CLIENT_SECRET
     "X-Hive-Admin-Token" = $env:BUMBLEBEE_HIVE_ADMIN_TOKEN
-  }
+  } `
+  -Body (@{ reason = "developer offboarded" } | ConvertTo-Json) `
+  -ContentType "application/json"
+```
+
+To re-enable the device:
+
+```powershell
+Invoke-WebRequest -Method Post `
+  -Uri "https://hive.example.com/v1/admin/devices/<device-id>/enable" `
+  -Headers @{
+    "CF-Access-Client-Id" = $env:BUMBLEBEE_HIVE_ACCESS_CLIENT_ID
+    "CF-Access-Client-Secret" = $env:BUMBLEBEE_HIVE_ACCESS_CLIENT_SECRET
+    "X-Hive-Admin-Token" = $env:BUMBLEBEE_HIVE_ADMIN_TOKEN
+  } `
+  -Body (@{ reason = "mistaken disable" } | ConvertTo-Json) `
+  -ContentType "application/json"
 ```
 
 Disabled devices are rejected on later ingest because their row no longer
-matches the active-device lookup.
+matches the active-device lookup. Lifecycle actions write metadata-only audit
+events to `device_lifecycle_events`.
 
-Wrangler D1 fallback:
+The admin UI supports the same disable/enable actions from the device detail
+panel when the operator's Access JWT identity matches
+`UI_ADMIN_ACTION_EMAILS` or `UI_ADMIN_ACTION_DOMAINS`. The UI requires a short
+reason and confirmation before sending the action, and it never sends
+`X-Hive-Admin-Token`.
+
+Wrangler D1 fallback for emergency disable only:
 
 ```powershell
 npx wrangler d1 execute bumblebee-hive --remote `

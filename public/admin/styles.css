@@ -170,6 +170,15 @@ button:hover {
   background: var(--brand-dark);
 }
 
+button.danger {
+  background: var(--danger);
+  border-color: var(--danger);
+}
+
+button.danger:hover {
+  background: #8a1c14;
+}
+
 #clear-device {
   background: #fff;
   color: var(--brand-dark);
@@ -266,6 +275,19 @@ tr[data-device-id]:hover {
   overflow-wrap: anywhere;
 }
 
+.lifecycle-actions {
+  align-items: end;
+  border-top: 1px solid var(--line);
+  display: grid;
+  gap: 10px;
+  grid-template-columns: minmax(220px, 1fr) auto auto;
+  padding: 14px 16px;
+}
+
+.lifecycle-actions label {
+  margin: 0;
+}
+
 .error {
   background: #fff1f2;
   border: 1px solid #fecdd3;
@@ -295,6 +317,11 @@ tr[data-device-id]:hover {
 
   .metrics,
   .detail-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .lifecycle-actions {
+    align-items: stretch;
     grid-template-columns: 1fr;
   }
 }

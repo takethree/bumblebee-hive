@@ -1,0 +1,213 @@
+version: 2
+goal:
+  status: active
+  title: Hive Device Lifecycle Controls
+  slug: hive-device-lifecycle-controls
+  created_at: "2026-05-27"
+  first_milestone_complete: false
+  intake:
+    original_request: "$goalbuddy:goal-prep"
+    interpreted_outcome: "Add audit-backed device disable/enable controls through both script APIs and the Hive admin UI without weakening browser-secret or admin-token boundaries."
+    input_shape: existing_plan
+    audience: "Hive operators managing enrolled Bumblebee developer endpoints."
+    authority: approved
+    proof_type: demo
+    completion_proof: "Script and UI disable/enable paths work with audit events, tests prove auth boundaries and metadata minimization, docs explain both paths, and deployment or dry-run proof passes."
+    existing_plan_facts:
+      - "Support both UI and script paths."
+      - "Support disable and enable only."
+      - "UI writes require Cloudflare Access JWT plus Hive-managed env allowlist."
+      - "Script writes keep Access plus X-Hive-Admin-Token."
+      - "Browser code must not store or send ADMIN_TOKEN."
+      - "UI actions require a short reason and confirmation."
+      - "Add durable device lifecycle audit events."
+      - "Do not add delete, full revoke, HMAC rotation, raw inventory browsing, local uninstall orchestration, or data purge semantics."
+  oracle:
+    signal: "A permitted operator can disable and re-enable a test device through both script and UI paths, and each action leaves a metadata-only audit event."
+    final_proof: "Tests, D1 migration validation, static secret scans, Wrangler validation/deploy proof, and redacted API/UI smoke prove lifecycle behavior and auth boundaries."
+agents:
+  scout: bundled_not_installed
+  worker: bundled_not_installed
+  judge: bundled_not_installed
+visual_board:
+  selected: local
+  status: blocked
+  url: null
+  note: "Local board startup failed before serving a URL: goalbuddy catalog fetch returned HTTP 404. File-backed board remains usable."
+rules:
+  continuous_until_full_outcome: true
+  missing_input_or_credentials_do_not_stop_goal: true
+  goal_pressure_requires_oracle: true
+  no_completion_on_weak_proof: true
+active_task: T004
+tasks:
+  - id: T001
+    type: judge
+    assignee: Judge
+    status: done
+    objective: "Validate the approved lifecycle plan against current Hive routes, schema, UI, tests, migration/deploy config, and choose the exact Worker package."
+    allowed_files:
+      - "docs/goals/hive-device-lifecycle-controls/state.yaml"
+      - "docs/goals/hive-device-lifecycle-controls/notes/**"
+    verify:
+      - "Read-only validation only: inspect current Worker routes, UI assets, tests, migrations, README, deploy config, and prior goal receipts as needed."
+      - "Emit a Judge receipt with decision, current-state facts, exact Worker objective, allowed_files, verify commands, and stop_if conditions."
+    stop_if:
+      - "The plan requires placing ADMIN_TOKEN, service-token secrets, enrollment tokens, HMAC keys, or Hive encryption keys in browser JavaScript."
+      - "The plan requires delete/revoke/purge/HMAC rotation semantics rather than reversible disable/enable."
+      - "The plan requires exposing raw inventory, summary_json, R2 object keys, HMAC material, Access secrets, hostnames, usernames, SIDs, full local profile paths, or raw device payloads."
+      - "The plan would weaken existing /v1/admin/* token requirements."
+    receipt:
+      result: done
+      decision: proceed
+      note: "See notes/T001-judge.md."
+      full_outcome_complete: false
+      summary: "Proceed with one coherent Worker package: lifecycle audit migration, shared disable/enable logic, script and UI endpoints, UI allowlist, device-detail controls/events, docs, and tests."
+  - id: T002
+    type: worker
+    assignee: Worker
+    status: done
+    objective: "Implement the validated local lifecycle package: migration, script/UI routes, audit events, admin UI controls, docs, and tests."
+    allowed_files:
+      - "src/index.ts"
+      - "public/admin/**"
+      - "test/**"
+      - "README.md"
+      - "docs/developer-rollout-runbook.md"
+      - "migrations/**"
+      - "docs/goals/hive-device-lifecycle-controls/state.yaml"
+      - "docs/goals/hive-device-lifecycle-controls/notes/**"
+    verify:
+      - "npm test"
+      - "npm run typecheck"
+      - "npm run lint"
+      - "npm run build"
+      - "node --check public/admin/app.js"
+      - "Wrangler deploy dry-run or equivalent validation if available without mutating production state."
+      - "Static sensitive-value scan over browser-visible assets, source, tests, README, docs, and GoalBuddy receipts."
+      - "git diff --check"
+    stop_if:
+      - "Need files outside allowed_files."
+      - "Need to put admin or service credentials in browser-visible code."
+      - "Need to delete, revoke, purge, rotate HMAC material, or uninstall local endpoint state."
+      - "Need to weaken /v1/admin/* admin-token authorization."
+      - "Need production-only Cloudflare Access policy changes before local tests can pass."
+    receipt:
+      result: done
+      note: "See notes/T002-implementation.md."
+      changed_files:
+        - "src/index.ts"
+        - "public/admin/index.html"
+        - "public/admin/styles.css"
+        - "public/admin/app.js"
+        - "test/ingest.test.ts"
+        - "README.md"
+        - "docs/developer-rollout-runbook.md"
+        - "migrations/0004_device_lifecycle_events.sql"
+        - "docs/goals/hive-device-lifecycle-controls/state.yaml"
+        - "docs/goals/hive-device-lifecycle-controls/notes/T001-judge.md"
+        - "docs/goals/hive-device-lifecycle-controls/notes/T002-implementation.md"
+      commands:
+        - cmd: "npm test"
+          status: pass
+        - cmd: "npm run typecheck"
+          status: pass
+        - cmd: "npm run lint"
+          status: pass
+        - cmd: "npm run build"
+          status: pass
+        - cmd: "node --check public/admin/app.js"
+          status: pass
+        - cmd: "npx wrangler deploy --config wrangler.toml --dry-run"
+          status: pass
+        - cmd: "npx wrangler deploy --config wrangler.deploy.toml --dry-run"
+          status: pass
+        - cmd: "Browser-visible static asset sensitive-value scan"
+          status: pass
+        - cmd: "Repo/org sensitive-value scan"
+          status: pass
+        - cmd: "git diff --check"
+          status: pass
+      summary: "Implemented audited disable/enable controls for script and UI paths with UI Access-JWT allowlist, audit migration/events, device-detail controls, docs, and tests."
+  - id: T003
+    type: worker
+    assignee: Worker
+    status: done
+    objective: "Apply or validate deployment for lifecycle controls and record redacted live evidence where safe."
+    allowed_files:
+      - "README.md"
+      - "docs/developer-rollout-runbook.md"
+      - "docs/goals/hive-device-lifecycle-controls/state.yaml"
+      - "docs/goals/hive-device-lifecycle-controls/notes/**"
+    verify:
+      - "If deployment credentials/config are available, apply the D1 migration and deploy the Worker."
+      - "Smoke script lifecycle endpoints against a disposable or explicitly approved test device only."
+      - "Smoke UI lifecycle routes only when an allowlisted Access actor/session is available."
+      - "If live action smoke is not safe, record the precise skipped condition and preserve local/dry-run proof."
+      - "Confirm browser-visible code contains no secret literals or org-specific values."
+      - "git status --short --branch"
+    stop_if:
+      - "Live proof would disable or enable a real pilot device without explicit operator approval."
+      - "Live proof would require printing tokens, tenant IDs, user identities, device IDs, hostnames, usernames, SIDs, full local paths, or raw inventory payloads."
+      - "Deployment would require unapproved Cloudflare Access policy edits."
+    receipt:
+      result: done
+      note: "See notes/T003-deploy-proof.md."
+      changed_files:
+        - "docs/goals/hive-device-lifecycle-controls/state.yaml"
+        - "docs/goals/hive-device-lifecycle-controls/notes/T003-deploy-proof.md"
+      commands:
+        - cmd: "npx wrangler d1 migrations apply bumblebee-hive --remote --config wrangler.deploy.toml"
+          status: pass
+        - cmd: "npx wrangler deploy --config wrangler.deploy.toml"
+          status: pass
+        - cmd: "Redacted live smoke for /admin/, /admin/app.js, /v1/ui/admin/overview, and synthetic lifecycle routes"
+          status: pass
+        - cmd: "npx wrangler secret list --config wrangler.deploy.toml"
+          status: pass
+        - cmd: "Browser-visible static asset sensitive-value scan"
+          status: pass
+        - cmd: "Repo/org sensitive-value scan"
+          status: pass
+        - cmd: "git diff --check"
+          status: pass
+      summary: "Applied the lifecycle audit migration, deployed Worker/assets, and recorded redacted non-destructive live route smoke. Live UI write smoke remains gated on an operator-provided UI action allowlist and browser Access actor."
+  - id: T004
+    type: worker
+    assignee: Worker
+    status: active
+    objective: "Configure the production UI action allowlist and run a redacted live UI lifecycle smoke against a disposable or explicitly approved device."
+    allowed_files:
+      - "README.md"
+      - "docs/developer-rollout-runbook.md"
+      - "docs/goals/hive-device-lifecycle-controls/state.yaml"
+      - "docs/goals/hive-device-lifecycle-controls/notes/**"
+    verify:
+      - "Set either UI_ADMIN_ACTION_EMAILS or UI_ADMIN_ACTION_DOMAINS as a Worker secret using the operator-approved value."
+      - "Use an authenticated browser Access session for an allowlisted actor."
+      - "Run UI disable and enable only against a disposable enrolled device or a device explicitly approved by the operator."
+      - "Record redacted evidence without printing tokens, tenant IDs, user identities, device IDs, hostnames, usernames, SIDs, full local paths, or raw inventory payloads."
+      - "Confirm script and UI metadata routes still return no-store metadata-only responses."
+      - "git status --short --branch"
+    stop_if:
+      - "The operator has not provided the UI action allowlist value."
+      - "No disposable or explicitly approved device is available for live disable/enable."
+      - "No authenticated browser Access session is available for an allowlisted actor."
+      - "The smoke would expose tokens, raw device IDs, user identities, hostnames, usernames, SIDs, full local paths, or raw inventory payloads."
+    receipt: null
+  - id: T999
+    type: judge
+    assignee: Judge
+    status: queued
+    objective: "Final audit: decide whether the lifecycle-controls tranche satisfies the original owner outcome."
+    allowed_files:
+      - "docs/goals/hive-device-lifecycle-controls/state.yaml"
+      - "docs/goals/hive-device-lifecycle-controls/notes/**"
+    verify:
+      - "Review changed files, migration state, task receipts, tests, secret scans, UI/API smoke evidence, deployment state, and git status."
+      - "Reject completion if browser code needs ADMIN_TOKEN or if UI/API exposes forbidden raw or identity fields."
+      - "Reject completion if disable/enable lacks audit evidence or if queued/active Worker work remains required."
+    stop_if:
+      - "Any final proof is weak, stale, missing, or contains sensitive values."
+      - "Queued or active Worker work remains required for lifecycle controls."
+    receipt: null

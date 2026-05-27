@@ -1,4 +1,4 @@
-import { createRemoteJWKSet, jwtVerify } from "jose";
+import { createRemoteJWKSet, jwtVerify, type JWTPayload } from "jose";
 
 export interface Env {
   ACCESS_CLIENT_ID: string;
@@ -20,6 +20,8 @@ export interface Env {
   HEALTH_EXPECTED_CADENCE_HOURS?: string;
   HEALTH_STALE_HOURS?: string;
   HEALTH_WEEKEND_GRACE_HOURS?: string;
+  UI_ADMIN_ACTION_EMAILS?: string;
+  UI_ADMIN_ACTION_DOMAINS?: string;
 }
 
 interface InventoryRecord {
@@ -90,6 +92,18 @@ interface AdminHealthRow {
   last_complete_received_at: string | null;
 }
 
+interface AdminLifecycleEventRow {
+  event_id: string;
+  device_id: string;
+  action: LifecycleAction;
+  actor_type: string;
+  actor_id: string;
+  reason: string;
+  previous_disabled_at: string | null;
+  new_disabled_at: string | null;
+  created_at: string;
+}
+
 interface RetentionBatchRow {
   batch_id: string;
   object_key: string;
@@ -123,6 +137,18 @@ const defaultHealthStaleHours = 24;
 const defaultHealthWeekendGraceHours = 72;
 const accessJWKSByURL = new Map<string, ReturnType<typeof createRemoteJWKSet>>();
 
+type LifecycleAction = "disable" | "enable";
+
+interface LifecycleActor {
+  type: "script" | "ui";
+  id: string;
+}
+
+interface UIAdminActor extends LifecycleActor {
+  type: "ui";
+  email: string;
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
@@ -145,6 +171,14 @@ export default {
       const disableMatch = url.pathname.match(/^\/v1\/admin\/devices\/([^/]+)\/disable$/);
       if (request.method === "POST" && disableMatch) {
         return await disableDevice(request, env, disableMatch[1]);
+      }
+      const enableMatch = url.pathname.match(/^\/v1\/admin\/devices\/([^/]+)\/enable$/);
+      if (request.method === "POST" && enableMatch) {
+        return await enableDevice(request, env, enableMatch[1]);
+      }
+      const uiLifecycleMatch = url.pathname.match(/^\/v1\/ui\/admin\/devices\/([^/]+)\/(disable|enable)$/);
+      if (request.method === "POST" && uiLifecycleMatch) {
+        return await uiDeviceLifecycle(request, env, uiLifecycleMatch[1], uiLifecycleMatch[2] as LifecycleAction);
       }
       if (request.method === "POST" && url.pathname === "/v1/admin/retention/run") {
         return await runRetentionAdmin(request, env, url);
@@ -290,22 +324,83 @@ async function ingest(request: Request, env: Env): Promise<Response> {
 async function disableDevice(request: Request, env: Env, rawDeviceID: string): Promise<Response> {
   requireAccess(request, env);
   requireAdminToken(request, env);
+  const body = await readOptionalJson<{ reason?: string }>(request);
+  return adminJson(await changeDeviceLifecycle(env, rawDeviceID, "disable", {
+    type: "script",
+    id: "script_admin"
+  }, lifecycleReason(body.reason, false)));
+}
 
+async function enableDevice(request: Request, env: Env, rawDeviceID: string): Promise<Response> {
+  requireAccess(request, env);
+  requireAdminToken(request, env);
+  const body = await readOptionalJson<{ reason?: string }>(request);
+  return adminJson(await changeDeviceLifecycle(env, rawDeviceID, "enable", {
+    type: "script",
+    id: "script_admin"
+  }, lifecycleReason(body.reason, false)));
+}
+
+async function uiDeviceLifecycle(request: Request, env: Env, rawDeviceID: string, action: LifecycleAction): Promise<Response> {
+  const actor = await requireUIAdminActionRequest(request, env);
+  const body = await readOptionalJson<{ reason?: string }>(request);
+  return adminJson(await changeDeviceLifecycle(env, rawDeviceID, action, actor, lifecycleReason(body.reason, true)));
+}
+
+async function changeDeviceLifecycle(env: Env, rawDeviceID: string, action: LifecycleAction, actor: LifecycleActor, reason: string): Promise<object> {
   const deviceID = sanitizeDeviceID(decodeURIComponent(rawDeviceID));
   if (!deviceID) {
     throw new HttpError(400, "invalid_device_id");
   }
 
-  const disabledAt = new Date().toISOString();
-  const result = await env.DB.prepare(
-    "UPDATE devices SET disabled_at = ? WHERE device_id = ? AND disabled_at IS NULL"
-  ).bind(disabledAt, deviceID).run();
-  const changes = typeof result.meta?.changes === "number" ? result.meta.changes : 0;
-  if (changes === 0) {
+  const current = await env.DB.prepare("SELECT disabled_at FROM devices WHERE device_id = ?").bind(deviceID).first<{ disabled_at: string | null }>();
+  if (!current) {
     throw new HttpError(404, "device_not_found");
   }
+  if (action === "disable" && current.disabled_at) {
+    throw new HttpError(409, "device_already_disabled");
+  }
+  if (action === "enable" && !current.disabled_at) {
+    throw new HttpError(409, "device_already_active");
+  }
 
-  return json({ ok: true, device_id: deviceID, disabled_at: disabledAt });
+  const changedAt = new Date().toISOString();
+  const newDisabledAt = action === "disable" ? changedAt : null;
+  const updateSQL = action === "disable"
+    ? "UPDATE devices SET disabled_at = ? WHERE device_id = ? AND disabled_at IS NULL"
+    : "UPDATE devices SET disabled_at = NULL WHERE device_id = ? AND disabled_at IS NOT NULL";
+  const updateValues = action === "disable" ? [newDisabledAt, deviceID] : [deviceID];
+  const eventID = crypto.randomUUID();
+  const updateStmt = env.DB.prepare(updateSQL).bind(...updateValues);
+  const eventStmt = env.DB.prepare(
+    "INSERT INTO device_lifecycle_events (event_id, device_id, action, actor_type, actor_id, reason, previous_disabled_at, new_disabled_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+  ).bind(eventID, deviceID, action, actor.type, actor.id, reason, current.disabled_at, newDisabledAt, changedAt);
+  const results = typeof env.DB.batch === "function"
+    ? await env.DB.batch([updateStmt, eventStmt])
+    : [await updateStmt.run(), await eventStmt.run()];
+  const changes = typeof results[0]?.meta?.changes === "number" ? results[0].meta.changes : 0;
+  if (changes === 0) {
+    throw new HttpError(409, action === "disable" ? "device_already_disabled" : "device_already_active");
+  }
+
+  return {
+    ok: true,
+    device: {
+      device_id: deviceID,
+      status: newDisabledAt ? "disabled" : "active",
+      disabled_at: newDisabledAt
+    },
+    event: {
+      event_id: eventID,
+      action,
+      actor_type: actor.type,
+      actor_id: actor.id,
+      reason,
+      previous_disabled_at: current.disabled_at,
+      new_disabled_at: newDisabledAt,
+      created_at: changedAt
+    }
+  };
 }
 
 async function runRetentionAdmin(request: Request, env: Env, url: URL): Promise<Response> {
@@ -549,10 +644,16 @@ async function adminDeviceDetailData(env: Env, rawDeviceID: string): Promise<obj
   const runs = await allRows<AdminRunRow>(
     env.DB.prepare(`${adminRunSelect()} WHERE r.device_id = ? ORDER BY r.received_at DESC LIMIT 10`).bind(deviceID)
   );
+  const lifecycleEvents = await allRows<AdminLifecycleEventRow>(
+    env.DB.prepare(
+      "SELECT event_id, device_id, action, actor_type, actor_id, reason, previous_disabled_at, new_disabled_at, created_at FROM device_lifecycle_events WHERE device_id = ? ORDER BY created_at DESC LIMIT 10"
+    ).bind(deviceID)
+  );
 
   return {
     device: formatAdminDeviceRow(device),
-    recent_runs: rowsWithCounts(runs)
+    recent_runs: rowsWithCounts(runs),
+    lifecycle_events: lifecycleEvents.map(formatLifecycleEventRow)
   };
 }
 
@@ -659,6 +760,20 @@ function rowsWithCounts(rows: AdminRunRow[]): object[] {
     batch_count: row.batch_count || 0,
     record_count: row.record_count || 0
   }));
+}
+
+function formatLifecycleEventRow(row: AdminLifecycleEventRow): object {
+  return {
+    event_id: row.event_id,
+    device_id: row.device_id,
+    action: row.action,
+    actor_type: row.actor_type,
+    actor_id: row.actor_id,
+    reason: row.reason,
+    previous_disabled_at: row.previous_disabled_at,
+    new_disabled_at: row.new_disabled_at,
+    created_at: row.created_at
+  };
 }
 
 type HealthStatus = "healthy" | "stale" | "attention" | "unknown";
@@ -801,7 +916,7 @@ function requireAdminRequest(request: Request, env: Env): void {
   requireAdminToken(request, env);
 }
 
-async function requireUIAdminRequest(request: Request, env: Env): Promise<void> {
+async function requireUIAdminRequest(request: Request, env: Env): Promise<JWTPayload> {
   const token = request.headers.get(accessJWTHeader);
   if (!token) {
     throw new HttpError(403, "missing_access_jwt");
@@ -817,14 +932,52 @@ async function requireUIAdminRequest(request: Request, env: Env): Promise<void> 
     jwks = createRemoteJWKSet(new URL(certsURL));
     accessJWKSByURL.set(certsURL, jwks);
   }
+  let payload: JWTPayload;
   try {
-    await jwtVerify(token, jwks, {
+    const verified = await jwtVerify(token, jwks, {
       audience: env.ACCESS_AUD,
       issuer
     });
+    payload = verified.payload;
   } catch {
     throw new HttpError(403, "invalid_access_jwt");
   }
+  return payload;
+}
+
+async function requireUIAdminActionRequest(request: Request, env: Env): Promise<UIAdminActor> {
+  const actor = uiActorFromPayload(await requireUIAdminRequest(request, env));
+  const allowedEmails = csvSet(env.UI_ADMIN_ACTION_EMAILS);
+  const allowedDomains = csvSet(env.UI_ADMIN_ACTION_DOMAINS);
+  if (allowedEmails.size === 0 && allowedDomains.size === 0) {
+    throw new HttpError(403, "ui_admin_actions_not_configured");
+  }
+  const email = actor.email.toLowerCase();
+  const domain = email.includes("@") ? email.split("@").at(-1) || "" : "";
+  if (!allowedEmails.has(email) && !allowedDomains.has(domain)) {
+    throw new HttpError(403, "ui_admin_action_forbidden");
+  }
+  return actor;
+}
+
+function uiActorFromPayload(payload: JWTPayload): UIAdminActor {
+  const emailClaim = payload.email;
+  const email = typeof emailClaim === "string" ? emailClaim.trim().toLowerCase() : "";
+  if (!email || !email.includes("@")) {
+    throw new HttpError(403, "ui_admin_actor_unavailable");
+  }
+  return {
+    type: "ui",
+    id: email,
+    email
+  };
+}
+
+function csvSet(value: string | undefined): Set<string> {
+  return new Set((value || "")
+    .split(",")
+    .map((entry) => entry.trim().toLowerCase())
+    .filter(Boolean));
 }
 
 function requireAdminToken(request: Request, env: Env): void {
@@ -943,6 +1096,23 @@ async function readOptionalJson<T>(request: Request): Promise<T> {
   } catch {
     throw new HttpError(400, "invalid_json");
   }
+}
+
+function lifecycleReason(value: string | undefined, required: boolean): string {
+  const reason = (value || "").trim();
+  if (!reason) {
+    if (required) {
+      throw new HttpError(400, "missing_reason");
+    }
+    return "script_operator_action";
+  }
+  if (reason.length < 3) {
+    throw new HttpError(400, "invalid_reason");
+  }
+  if (reason.length > 500) {
+    throw new HttpError(400, "reason_too_long");
+  }
+  return reason;
 }
 
 function sanitizeDeviceID(value: string): string {

@@ -61,6 +61,10 @@ class MemoryStmt {
         hmac_key_nonce: device.hmac_key_nonce
       } as T;
     }
+    if (this.sql.startsWith("SELECT disabled_at FROM devices")) {
+      const device = this.db.devices.get(String(this.values[0]));
+      return device ? { disabled_at: device.disabled_at } as T : null;
+    }
     if (this.sql.startsWith("SELECT COUNT(*) AS total_devices")) {
       const devices = [...this.db.devices.values()];
       return {
@@ -123,6 +127,9 @@ class MemoryStmt {
       }
       return { results: this.page(rows) as T[] };
     }
+    if (this.sql.includes("FROM device_lifecycle_events")) {
+      return { results: this.db.lifecycleEventRows(String(this.values[0])).slice(0, 10) as T[] };
+    }
     if (this.sql.includes("FROM runs r")) {
       let rows = this.db.adminRunRows();
       let valueIndex = 0;
@@ -157,6 +164,13 @@ class MemoryStmt {
       const [deviceID, profile, runID] = this.values.map(String);
       this.db.runs = this.db.runs.filter((run) => String(run[0]) !== deviceID || String(run[1]) !== profile || String(run[2]) !== runID);
       this.db.runs.push(this.values);
+    } else if (this.sql.startsWith("UPDATE devices SET disabled_at = NULL")) {
+      const device = this.db.devices.get(String(this.values[0]));
+      if (device && device.disabled_at) {
+        device.disabled_at = null;
+        return { success: true, meta: { duration: 0, changes: 1 } } as D1Result;
+      }
+      return { success: true, meta: { duration: 0, changes: 0 } } as D1Result;
     } else if (this.sql.startsWith("UPDATE devices SET disabled_at")) {
       const device = this.db.devices.get(String(this.values[1]));
       if (device && !device.disabled_at) {
@@ -164,6 +178,8 @@ class MemoryStmt {
         return { success: true, meta: { duration: 0, changes: 1 } } as D1Result;
       }
       return { success: true, meta: { duration: 0, changes: 0 } } as D1Result;
+    } else if (this.sql.startsWith("INSERT INTO device_lifecycle_events")) {
+      this.db.lifecycleEvents.push(this.values);
     } else if (this.sql.startsWith("DELETE FROM batches")) {
       const ids = new Set(this.values.map(String));
       const before = this.db.batches.length;
@@ -209,9 +225,18 @@ class MemoryD1 {
   devices = new Map<string, { hmac_key_ciphertext: string; hmac_key_nonce: string; created_at: string; disabled_at: string | null }>();
   batches: unknown[][] = [];
   runs: unknown[][] = [];
+  lifecycleEvents: unknown[][] = [];
 
   prepare(sql: string): MemoryStmt {
     return new MemoryStmt(this, sql);
+  }
+
+  async batch(statements: MemoryStmt[]): Promise<D1Result[]> {
+    const results: D1Result[] = [];
+    for (const statement of statements) {
+      results.push(await statement.run());
+    }
+    return results;
   }
 
   batchRows(): Array<{ batch_id: string; device_id: string; run_id: string; received_at: string; object_key: string; record_count: number }> {
@@ -322,6 +347,33 @@ class MemoryD1 {
         };
       });
   }
+
+  lifecycleEventRows(deviceID: string): Array<{
+    event_id: string;
+    device_id: string;
+    action: string;
+    actor_type: string;
+    actor_id: string;
+    reason: string;
+    previous_disabled_at: string | null;
+    new_disabled_at: string | null;
+    created_at: string;
+  }> {
+    return this.lifecycleEvents
+      .filter((event) => String(event[1]) === deviceID)
+      .map((event) => ({
+        event_id: String(event[0]),
+        device_id: String(event[1]),
+        action: String(event[2]),
+        actor_type: String(event[3]),
+        actor_id: String(event[4]),
+        reason: String(event[5]),
+        previous_disabled_at: event[6] === null || event[6] === undefined ? null : String(event[6]),
+        new_disabled_at: event[7] === null || event[7] === undefined ? null : String(event[7]),
+        created_at: String(event[8])
+      }))
+      .sort((left, right) => right.created_at.localeCompare(left.created_at));
+  }
 }
 
 function base64url(bytes: Uint8Array): string {
@@ -371,7 +423,7 @@ function forbiddenVisibilityFields(body: unknown): string[] {
 let accessTestKeyPair: CryptoKeyPair | null = null;
 let accessTestJWK: unknown | null = null;
 
-async function accessJWT(env: Env, audience = env.ACCESS_AUD || "access-aud"): Promise<string> {
+async function accessJWT(env: Env, audience = env.ACCESS_AUD || "access-aud", email: string | null = "operator@example.test"): Promise<string> {
   if (!accessTestKeyPair || !accessTestJWK) {
     accessTestKeyPair = await generateKeyPair("RS256");
     const jwk = await exportJWK(accessTestKeyPair.publicKey);
@@ -389,7 +441,8 @@ async function accessJWT(env: Env, audience = env.ACCESS_AUD || "access-aud"): P
     }
     return originalFetch(input, init);
   }) as typeof fetch;
-  return new SignJWT({ sub: "operator@example.test" })
+  const payload = email ? { sub: email, email } : { sub: "service-token-smoke" };
+  return new SignJWT(payload)
     .setProtectedHeader({ alg: "RS256", kid: "test-key" })
     .setIssuer(`https://${env.ACCESS_TEAM_DOMAIN}`)
     .setAudience(audience)
@@ -547,13 +600,69 @@ describe("bumblebee hive worker", () => {
     }), env);
 
     expect(disableResponse.status).toBe(200);
+    expect(disableResponse.headers.get("Cache-Control")).toBe("no-store");
     expect(env.DB.devices.get("device-1")?.disabled_at).toBeTruthy();
+    const disableBody = await disableResponse.json() as { event: { action: string; actor_type: string; reason: string } };
+    expect(disableBody.event).toMatchObject({ action: "disable", actor_type: "script", reason: "script_operator_action" });
+    expect(env.DB.lifecycleEvents).toHaveLength(1);
 
     const request = await signedRequest(env, gzipSync("{\"record_type\":\"scan_summary\",\"run_id\":\"run-1\"}\n"), hmacKey);
     const ingestResponse = await worker.fetch(request, env);
 
     expect(ingestResponse.status).toBe(401);
     expect(await ingestResponse.json()).toEqual({ error: "unknown_device" });
+  });
+
+  it("enables a disabled device through the admin endpoint and records audit events", async () => {
+    const env = makeEnv();
+    await addDevice(env, "device-1", "device-secret");
+    const disableResponse = await worker.fetch(new Request("https://hive.example.test/v1/admin/devices/device-1/disable", {
+      method: "POST",
+      headers: adminHeaders(env),
+      body: JSON.stringify({ reason: "retire laptop" })
+    }), env);
+    const enableResponse = await worker.fetch(new Request("https://hive.example.test/v1/admin/devices/device-1/enable", {
+      method: "POST",
+      headers: adminHeaders(env),
+      body: JSON.stringify({ reason: "mistaken disable" })
+    }), env);
+    const enableBody = await enableResponse.json() as { device: { status: string; disabled_at: string | null }; event: { action: string; reason: string; previous_disabled_at: string | null; new_disabled_at: string | null } };
+
+    expect(disableResponse.status).toBe(200);
+    expect(enableResponse.status).toBe(200);
+    expect(env.DB.devices.get("device-1")?.disabled_at).toBeNull();
+    expect(enableBody.device).toMatchObject({ status: "active", disabled_at: null });
+    expect(enableBody.event).toMatchObject({
+      action: "enable",
+      reason: "mistaken disable",
+      new_disabled_at: null
+    });
+    expect(enableBody.event.previous_disabled_at).toBeTruthy();
+    expect(env.DB.lifecycleEvents).toHaveLength(2);
+  });
+
+  it("returns lifecycle conflicts instead of silently repeating device state changes", async () => {
+    const env = makeEnv();
+    await addDevice(env, "device-1", "device-secret");
+
+    const enableActive = await worker.fetch(new Request("https://hive.example.test/v1/admin/devices/device-1/enable", {
+      method: "POST",
+      headers: adminHeaders(env)
+    }), env);
+    const disable = await worker.fetch(new Request("https://hive.example.test/v1/admin/devices/device-1/disable", {
+      method: "POST",
+      headers: adminHeaders(env)
+    }), env);
+    const disableAgain = await worker.fetch(new Request("https://hive.example.test/v1/admin/devices/device-1/disable", {
+      method: "POST",
+      headers: adminHeaders(env)
+    }), env);
+
+    expect(enableActive.status).toBe(409);
+    expect(await enableActive.json()).toEqual({ error: "device_already_active" });
+    expect(disable.status).toBe(200);
+    expect(disableAgain.status).toBe(409);
+    expect(await disableAgain.json()).toEqual({ error: "device_already_disabled" });
   });
 
   it("rejects admin disable without the admin token", async () => {
@@ -675,6 +784,27 @@ describe("bumblebee hive worker", () => {
     expect(forbiddenVisibilityFields(body)).toEqual([]);
   });
 
+  it("allows UI read metadata without an email claim but rejects UI writes without an actor email", async () => {
+    const env = makeEnv();
+    env.UI_ADMIN_ACTION_DOMAINS = "example.test";
+    await addDevice(env, "device-1", "device-secret");
+    const token = await accessJWT(env, env.ACCESS_AUD, null);
+
+    const readResponse = await worker.fetch(new Request("https://hive.example.test/v1/ui/admin/overview", {
+      headers: { "Cf-Access-Jwt-Assertion": token }
+    }), env);
+    const writeResponse = await worker.fetch(new Request("https://hive.example.test/v1/ui/admin/devices/device-1/disable", {
+      method: "POST",
+      headers: { "Cf-Access-Jwt-Assertion": token },
+      body: JSON.stringify({ reason: "developer offboarded" })
+    }), env);
+
+    expect(readResponse.status).toBe(200);
+    expect(writeResponse.status).toBe(403);
+    expect(await writeResponse.json()).toEqual({ error: "ui_admin_actor_unavailable" });
+    expect(env.DB.devices.get("device-1")?.disabled_at).toBeNull();
+  });
+
   it("returns UI device detail and runs with a valid Access JWT", async () => {
     const env = makeEnv();
     await ingestSummary(env, "device-1", "device-secret", "run-1");
@@ -691,6 +821,83 @@ describe("bumblebee hive worker", () => {
     expect(forbiddenVisibilityFields(await devicesResponse.json())).toEqual([]);
     expect(forbiddenVisibilityFields(await detailResponse.json())).toEqual([]);
     expect(forbiddenVisibilityFields(await runsResponse.json())).toEqual([]);
+  });
+
+  it("allows UI lifecycle actions only for allowlisted Access actors and returns audit detail", async () => {
+    const env = makeEnv();
+    env.UI_ADMIN_ACTION_EMAILS = "operator@example.test";
+    await addDevice(env, "device-1", "device-secret");
+    const headers = {
+      "Cf-Access-Jwt-Assertion": await accessJWT(env),
+      "Content-Type": "application/json"
+    };
+
+    const disableResponse = await worker.fetch(new Request("https://hive.example.test/v1/ui/admin/devices/device-1/disable", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ reason: "developer offboarded" })
+    }), env);
+    const enableResponse = await worker.fetch(new Request("https://hive.example.test/v1/ui/admin/devices/device-1/enable", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ reason: "developer returned" })
+    }), env);
+    const detailResponse = await worker.fetch(new Request("https://hive.example.test/v1/ui/admin/devices/device-1", {
+      headers: { "Cf-Access-Jwt-Assertion": await accessJWT(env) }
+    }), env);
+    const detail = await detailResponse.json() as { lifecycle_events: Array<{ action: string; actor_type: string; actor_id: string; reason: string }> };
+
+    expect(disableResponse.status).toBe(200);
+    expect(enableResponse.status).toBe(200);
+    expect(env.DB.devices.get("device-1")?.disabled_at).toBeNull();
+    expect(env.DB.lifecycleEvents).toHaveLength(2);
+    expect(detail.lifecycle_events).toHaveLength(2);
+    expect(detail.lifecycle_events.find((event) => event.action === "enable")).toMatchObject({
+      action: "enable",
+      actor_type: "ui",
+      actor_id: "operator@example.test",
+      reason: "developer returned"
+    });
+    expect(forbiddenVisibilityFields(detail)).toEqual([]);
+  });
+
+  it("rejects UI lifecycle actions without allowlist, allowed actor, or reason", async () => {
+    const env = makeEnv();
+    await addDevice(env, "device-1", "device-secret");
+    const token = await accessJWT(env);
+
+    const unconfigured = await worker.fetch(new Request("https://hive.example.test/v1/ui/admin/devices/device-1/disable", {
+      method: "POST",
+      headers: { "Cf-Access-Jwt-Assertion": token },
+      body: JSON.stringify({ reason: "developer offboarded" })
+    }), env);
+    env.UI_ADMIN_ACTION_DOMAINS = "example.org";
+    const forbidden = await worker.fetch(new Request("https://hive.example.test/v1/ui/admin/devices/device-1/disable", {
+      method: "POST",
+      headers: { "Cf-Access-Jwt-Assertion": token },
+      body: JSON.stringify({ reason: "developer offboarded" })
+    }), env);
+    env.UI_ADMIN_ACTION_DOMAINS = "example.test";
+    const missingReason = await worker.fetch(new Request("https://hive.example.test/v1/ui/admin/devices/device-1/disable", {
+      method: "POST",
+      headers: { "Cf-Access-Jwt-Assertion": token },
+      body: JSON.stringify({})
+    }), env);
+    const adminTokenOnly = await worker.fetch(new Request("https://hive.example.test/v1/ui/admin/devices/device-1/disable", {
+      method: "POST",
+      headers: { "X-Hive-Admin-Token": env.ADMIN_TOKEN },
+      body: JSON.stringify({ reason: "developer offboarded" })
+    }), env);
+
+    expect(unconfigured.status).toBe(403);
+    expect(await unconfigured.json()).toEqual({ error: "ui_admin_actions_not_configured" });
+    expect(forbidden.status).toBe(403);
+    expect(await forbidden.json()).toEqual({ error: "ui_admin_action_forbidden" });
+    expect(missingReason.status).toBe(400);
+    expect(await missingReason.json()).toEqual({ error: "missing_reason" });
+    expect(adminTokenOnly.status).toBe(403);
+    expect(await adminTokenOnly.json()).toEqual({ error: "missing_access_jwt" });
+    expect(env.DB.lifecycleEvents).toHaveLength(0);
   });
 
   it("returns UI health with configurable baseline stale and weekend grace", async () => {

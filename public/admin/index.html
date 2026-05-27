@@ -114,6 +114,29 @@
           <button id="clear-device" type="button">Clear</button>
         </div>
         <div id="detail-summary" class="detail-grid"></div>
+        <div class="lifecycle-actions" aria-label="Device lifecycle actions">
+          <label>
+            Reason
+            <input id="lifecycle-reason" type="text" maxlength="500" placeholder="short audit reason">
+          </label>
+          <button id="disable-device" class="danger" type="button" hidden>Disable</button>
+          <button id="enable-device" type="button" hidden>Enable</button>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Action</th>
+                <th>Actor</th>
+                <th>Reason</th>
+                <th>Time</th>
+              </tr>
+            </thead>
+            <tbody id="detail-events-body">
+              <tr><td colspan="4">No lifecycle events.</td></tr>
+            </tbody>
+          </table>
+        </div>
         <div class="table-wrap">
           <table>
             <thead>
