@@ -1,6 +1,8 @@
 name = "bumblebee-hive"
 main = "src/index.ts"
 compatibility_date = "2026-05-26"
+workers_dev = false
+preview_urls = false
 
 [assets]
 directory = "./public"
