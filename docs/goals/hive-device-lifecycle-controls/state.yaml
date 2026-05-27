@@ -39,7 +39,7 @@ rules:
   missing_input_or_credentials_do_not_stop_goal: true
   goal_pressure_requires_oracle: true
   no_completion_on_weak_proof: true
-active_task: T004
+active_task: T005
 tasks:
   - id: T001
     type: judge
@@ -175,7 +175,7 @@ tasks:
   - id: T004
     type: worker
     assignee: Worker
-    status: active
+    status: blocked
     objective: "Configure the production UI action allowlist and run a redacted live UI lifecycle smoke against a disposable or explicitly approved device."
     allowed_files:
       - "README.md"
@@ -188,6 +188,42 @@ tasks:
       - "Run UI disable and enable only against a disposable enrolled device or a device explicitly approved by the operator."
       - "Record redacted evidence without printing tokens, tenant IDs, user identities, device IDs, hostnames, usernames, SIDs, full local paths, or raw inventory payloads."
       - "Confirm script and UI metadata routes still return no-store metadata-only responses."
+      - "git status --short --branch"
+    stop_if:
+      - "The operator has not provided the UI action allowlist value."
+      - "No disposable or explicitly approved device is available for live disable/enable."
+      - "No authenticated browser Access session is available for an allowlisted actor."
+      - "The smoke would expose tokens, raw device IDs, user identities, hostnames, usernames, SIDs, full local paths, or raw inventory payloads."
+    receipt:
+      result: blocked
+      note: "See notes/T004-script-live-smoke.md."
+      changed_files:
+        - "docs/goals/hive-device-lifecycle-controls/state.yaml"
+        - "docs/goals/hive-device-lifecycle-controls/notes/T004-script-live-smoke.md"
+      commands:
+        - cmd: "Redacted live disposable-device script lifecycle smoke"
+          status: pass
+      summary: "Completed live disposable-device script disable/enable/final-disable proof with three audit events and zero forbidden field matches. UI write smoke remains blocked on operator-approved UI action allowlist and an authenticated browser Access actor."
+      blocked_on:
+        - "Operator-approved UI_ADMIN_ACTION_EMAILS or UI_ADMIN_ACTION_DOMAINS value."
+        - "Authenticated browser Access session whose JWT contains an allowlisted email actor claim."
+        - "Disposable or explicitly approved device for UI disable/enable smoke."
+  - id: T005
+    type: worker
+    assignee: Worker
+    status: active
+    objective: "Complete the remaining live UI lifecycle proof after the operator provides the UI action allowlist and an allowlisted browser Access session."
+    allowed_files:
+      - "README.md"
+      - "docs/developer-rollout-runbook.md"
+      - "docs/goals/hive-device-lifecycle-controls/state.yaml"
+      - "docs/goals/hive-device-lifecycle-controls/notes/**"
+    verify:
+      - "Set either UI_ADMIN_ACTION_EMAILS or UI_ADMIN_ACTION_DOMAINS as a Worker secret using the operator-approved value."
+      - "Use an authenticated browser Access session for an allowlisted actor."
+      - "Run UI disable and enable only against a disposable enrolled device or a device explicitly approved by the operator."
+      - "Record redacted evidence without printing tokens, tenant IDs, user identities, device IDs, hostnames, usernames, SIDs, full local paths, or raw inventory payloads."
+      - "Confirm metadata responses still use Cache-Control: no-store and contain no forbidden fields."
       - "git status --short --branch"
     stop_if:
       - "The operator has not provided the UI action allowlist value."
