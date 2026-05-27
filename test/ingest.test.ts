@@ -114,6 +114,9 @@ class MemoryStmt {
     if (this.sql.startsWith("SELECT COUNT(*) AS total FROM runs r")) {
       return { total: this.filteredRunRows().length } as T;
     }
+    if (this.sql.startsWith("SELECT COUNT(*) AS total FROM normalization_jobs")) {
+      return { total: this.filteredNormalizationJobRows().length } as T;
+    }
     if (this.sql.startsWith("SELECT COUNT(*) AS total") && this.sql.includes("FROM inventory_current")) {
       const rows = this.filteredCurrentRows();
       if (this.sql.includes("GROUP BY device_id, profile, ecosystem, normalized_name, version")) {
@@ -174,6 +177,9 @@ class MemoryStmt {
     }
     if (this.sql.includes("FROM device_lifecycle_events")) {
       return { results: this.db.lifecycleEventRows(String(this.values[0])).slice(0, 10) as T[] };
+    }
+    if (this.sql.includes("FROM normalization_jobs")) {
+      return { results: this.page(this.filteredNormalizationJobRows()) as T[] };
     }
     if (this.sql.includes("FROM runs r")) {
       let rows = this.db.adminRunRows();
@@ -266,7 +272,49 @@ class MemoryStmt {
     } else if (this.sql.startsWith("INSERT INTO device_lifecycle_events")) {
       this.db.lifecycleEvents.push(this.values);
     } else if (this.sql.startsWith("INSERT OR REPLACE INTO normalization_jobs")) {
-      this.db.normalizationJobs.set(String(this.values[0]), this.values);
+      if (this.sql.includes("'processing'")) {
+        this.db.normalizationJobs.set(String(this.values[0]), [
+          this.values[0],
+          this.values[1],
+          this.values[2],
+          "processing",
+          0,
+          0,
+          0,
+          0,
+          null,
+          this.values[3],
+          null
+        ]);
+      } else if (this.sql.includes("'complete'")) {
+        this.db.normalizationJobs.set(String(this.values[0]), [
+          this.values[0],
+          this.values[1],
+          this.values[2],
+          "complete",
+          this.values[3],
+          this.values[4],
+          this.values[5],
+          this.values[6],
+          null,
+          this.values[7],
+          this.values[8]
+        ]);
+      } else if (this.sql.includes("'error'")) {
+        this.db.normalizationJobs.set(String(this.values[0]), [
+          this.values[0],
+          this.values[1],
+          this.values[2],
+          "error",
+          0,
+          0,
+          0,
+          0,
+          this.values[3],
+          this.values[4],
+          this.values[5]
+        ]);
+      }
     } else if (this.sql.startsWith("INSERT OR REPLACE INTO inventory_records")) {
       const key = `${this.values[0]}|${this.values[1]}|${this.values[2]}`;
       this.db.inventoryRecords.set(key, this.values);
@@ -371,6 +419,28 @@ class MemoryStmt {
     return rows;
   }
 
+  private filteredNormalizationJobRows(): ReturnType<MemoryD1["normalizationJobRows"]> {
+    let rows = this.db.normalizationJobRows();
+    let valueIndex = 0;
+    if (this.sql.includes("device_id = ?")) {
+      const deviceID = String(this.values[valueIndex++]);
+      rows = rows.filter((row) => row.device_id === deviceID);
+    }
+    if (this.sql.includes("run_id = ?")) {
+      const runID = String(this.values[valueIndex++]);
+      rows = rows.filter((row) => row.run_id === runID);
+    }
+    if (this.sql.includes("status = ?")) {
+      const status = String(this.values[valueIndex++]);
+      rows = rows.filter((row) => row.status === status);
+    }
+    if (this.sql.includes("promoted_current = ?")) {
+      const promotedCurrent = Number(this.values[valueIndex++]);
+      rows = rows.filter((row) => row.promoted_current === promotedCurrent);
+    }
+    return rows;
+  }
+
   private filteredCurrentRows(): ReturnType<MemoryD1["currentRows"]> {
     let rows = this.db.currentRows();
     let valueIndex = 0;
@@ -401,8 +471,8 @@ class MemoryStmt {
   }
 
   private sortValue(row: unknown): string {
-    const typed = row as { last_run_received_at?: string | null; latest_observed_at?: string | null; created_at?: string; received_at?: string };
-    return typed.last_run_received_at || typed.latest_observed_at || typed.received_at || typed.created_at || "";
+    const typed = row as { last_run_received_at?: string | null; latest_observed_at?: string | null; started_at?: string; created_at?: string; received_at?: string };
+    return typed.last_run_received_at || typed.latest_observed_at || typed.started_at || typed.received_at || typed.created_at || "";
   }
 
   private packageSummaryRows(rows: ReturnType<MemoryD1["currentRows"]>): Array<Record<string, unknown>> {
@@ -820,6 +890,34 @@ class MemoryD1 {
       }))
       .sort((left, right) => right.created_at.localeCompare(left.created_at));
   }
+
+  normalizationJobRows(): Array<{
+    batch_id: string;
+    device_id: string;
+    run_id: string;
+    status: string;
+    records_seen: number;
+    packages_seen: number;
+    findings_seen: number;
+    promoted_current: number;
+    error: string | null;
+    started_at: string;
+    completed_at: string | null;
+  }> {
+    return [...this.normalizationJobs.values()].map((job) => ({
+      batch_id: String(job[0]),
+      device_id: String(job[1]),
+      run_id: String(job[2]),
+      status: String(job[3]),
+      records_seen: Number(job[4] || 0),
+      packages_seen: Number(job[5] || 0),
+      findings_seen: Number(job[6] || 0),
+      promoted_current: Number(job[7] || 0),
+      error: job[8] === null || job[8] === undefined ? null : String(job[8]),
+      started_at: String(job[9]),
+      completed_at: job[10] === null || job[10] === undefined ? null : String(job[10])
+    }));
+  }
 }
 
 function base64url(bytes: Uint8Array): string {
@@ -864,6 +962,39 @@ function forbiddenVisibilityFields(body: unknown): string[] {
   const text = JSON.stringify(body);
   return ["summary_json", "object_key", "hmac_key_ciphertext", "hmac_key_nonce", "body_sha256", "source_file", "project_path"]
     .filter((field) => text.includes(field));
+}
+
+function seedNormalizationJob(
+  env: Env & { DB: MemoryD1 },
+  overrides: Partial<ReturnType<MemoryD1["normalizationJobRows"]>[number]> = {}
+): void {
+  const row = {
+    batch_id: "batch-seeded",
+    device_id: "device-1",
+    run_id: "run-seeded",
+    status: "processing",
+    records_seen: 0,
+    packages_seen: 0,
+    findings_seen: 0,
+    promoted_current: 0,
+    error: null,
+    started_at: "2026-05-27T10:00:00.000Z",
+    completed_at: null,
+    ...overrides
+  };
+  env.DB.normalizationJobs.set(row.batch_id, [
+    row.batch_id,
+    row.device_id,
+    row.run_id,
+    row.status,
+    row.records_seen,
+    row.packages_seen,
+    row.findings_seen,
+    row.promoted_current,
+    row.error,
+    row.started_at,
+    row.completed_at
+  ]);
 }
 
 let accessTestKeyPair: CryptoKeyPair | null = null;
@@ -1441,6 +1572,119 @@ describe("bumblebee hive worker", () => {
     expect(forbiddenVisibilityFields(packageDetailBody)).toEqual([]);
   });
 
+  it("lists normalization job metadata with filters and sanitized errors", async () => {
+    const env = makeEnv();
+    const hmacKey = "device-secret";
+    await addDevice(env, "device-1", hmacKey);
+    const ndjson = [
+      JSON.stringify(packageRecord("run-1", "device-1")),
+      JSON.stringify(findingRecord("run-1", "device-1")),
+      JSON.stringify(summaryRecord("run-1", "device-1"))
+    ].join("\n") + "\n";
+    const ingestResponse = await worker.fetch(await signedRequest(env, gzipSync(ndjson), hmacKey), env);
+    expect(ingestResponse.status).toBe(200);
+    await testInternals.normalizeQueuedBatch(env, env.NORMALIZE_QUEUE.messages[0] as { device_id: string; run_id: string; batch_id: string });
+    seedNormalizationJob(env, {
+      batch_id: "batch-error",
+      device_id: "device-2",
+      run_id: "run-error",
+      status: "error",
+      error: "failed opening C:\\Users\\operator\\AppData\\Local\\Temp\\payload.ndjson.gz and raw/device/0123456789abcdef0123456789abcdef.ndjson.gz",
+      started_at: "2026-05-27T10:02:00.000Z",
+      completed_at: "2026-05-27T10:03:00.000Z"
+    });
+    seedNormalizationJob(env, {
+      batch_id: "batch-processing",
+      device_id: "device-1",
+      run_id: "run-queued",
+      status: "processing",
+      started_at: "2026-05-27T10:01:00.000Z"
+    });
+
+    const completeResponse = await worker.fetch(new Request("https://hive.example.test/v1/admin/normalization-jobs?device_id=device-1&run_id=run-1&status=complete&promoted_current=true&limit=1&offset=0", {
+      headers: adminHeaders(env)
+    }), env);
+    const completeBody = await completeResponse.json() as {
+      filters: Record<string, string>;
+      total: number;
+      page: number;
+      page_count: number;
+      has_more: boolean;
+      normalization_jobs: Array<{
+        status: string;
+        device_id: string;
+        run_id: string;
+        records_seen: number;
+        packages_seen: number;
+        findings_seen: number;
+        promoted_current: boolean;
+        error?: string | null;
+      }>;
+    };
+
+    expect(completeResponse.status).toBe(200);
+    expect(completeBody).toMatchObject({ total: 1, page: 1, page_count: 1, has_more: false });
+    expect(completeBody.filters).toMatchObject({
+      device_id: "device-1",
+      run_id: "run-1",
+      status: "complete",
+      promoted_current: "true"
+    });
+    expect(completeBody.normalization_jobs).toEqual([expect.objectContaining({
+      device_id: "device-1",
+      run_id: "run-1",
+      status: "complete",
+      records_seen: 3,
+      packages_seen: 1,
+      findings_seen: 1,
+      promoted_current: true,
+      error: null
+    })]);
+    expect(forbiddenVisibilityFields(completeBody)).toEqual([]);
+
+    const errorResponse = await worker.fetch(new Request("https://hive.example.test/v1/admin/normalization-jobs?status=error", {
+      headers: adminHeaders(env)
+    }), env);
+    const errorBody = await errorResponse.json() as { normalization_jobs: Array<{ status: string; error: string }> };
+    const errorText = JSON.stringify(errorBody);
+
+    expect(errorResponse.status).toBe(200);
+    expect(errorBody.normalization_jobs).toEqual([expect.objectContaining({ status: "error" })]);
+    expect(errorBody.normalization_jobs[0].error).toContain("[redacted-");
+    expect(errorText).not.toContain("Users");
+    expect(errorText).not.toContain("0123456789abcdef0123456789abcdef");
+    expect(errorText).not.toContain("payload.ndjson.gz");
+    expect(forbiddenVisibilityFields(errorBody)).toEqual([]);
+  });
+
+  it("returns UI normalization job metadata with Access JWT and no admin token", async () => {
+    const env = makeEnv();
+    seedNormalizationJob(env, {
+      batch_id: "batch-ui",
+      device_id: "device-ui",
+      run_id: "run-ui",
+      status: "complete",
+      records_seen: 2,
+      packages_seen: 1,
+      promoted_current: 1,
+      completed_at: "2026-05-27T10:05:00.000Z"
+    });
+    const token = await accessJWT(env);
+
+    const response = await worker.fetch(new Request("https://hive.example.test/v1/ui/admin/normalization-jobs?status=complete&promoted_current=true", {
+      headers: { "Cf-Access-Jwt-Assertion": token }
+    }), env);
+    const body = await response.json() as { normalization_jobs: Array<{ device_id: string; status: string; promoted_current: boolean }> };
+
+    expect(response.status).toBe(200);
+    expect(body.normalization_jobs).toEqual([expect.objectContaining({
+      device_id: "device-ui",
+      status: "complete",
+      promoted_current: true
+    })]);
+    expect(forbiddenVisibilityFields(body)).toEqual([]);
+  });
+
   it("accepts partial batches before the final scan summary", async () => {
     const env = makeEnv();
     const hmacKey = "device-secret";
@@ -1958,16 +2202,34 @@ describe("bumblebee hive worker", () => {
 
   it("returns a device detail with recent run metadata only", async () => {
     const env = makeEnv();
-    await ingestSummary(env, "device-1", "device-secret", "run-1");
+    const hmacKey = "device-secret";
+    await addDevice(env, "device-1", hmacKey);
+    const ndjson = [
+      JSON.stringify(packageRecord("run-1", "device-1")),
+      JSON.stringify(summaryRecord("run-1", "device-1"))
+    ].join("\n") + "\n";
+    const ingestResponse = await worker.fetch(await signedRequest(env, gzipSync(ndjson), hmacKey), env);
+    expect(ingestResponse.status).toBe(200);
+    await testInternals.normalizeQueuedBatch(env, env.NORMALIZE_QUEUE.messages[0] as { device_id: string; run_id: string; batch_id: string });
 
     const response = await worker.fetch(new Request("https://hive.example.test/v1/admin/devices/device-1", {
       headers: adminHeaders(env)
     }), env);
-    const body = await response.json() as { device: { device_id: string; run_count: number }; recent_runs: Array<{ run_id: string; batch_count: number; record_count: number }> };
+    const body = await response.json() as {
+      device: { device_id: string; run_count: number };
+      recent_runs: Array<{ run_id: string; batch_count: number; record_count: number }>;
+      recent_normalization_jobs: Array<{ run_id: string; status: string; records_seen: number; promoted_current: boolean }>;
+    };
 
     expect(response.status).toBe(200);
     expect(body.device).toMatchObject({ device_id: "device-1", run_count: 1 });
     expect(body.recent_runs).toEqual([expect.objectContaining({ run_id: "run-1", batch_count: 1, record_count: 2 })]);
+    expect(body.recent_normalization_jobs).toEqual([expect.objectContaining({
+      run_id: "run-1",
+      status: "complete",
+      records_seen: 2,
+      promoted_current: true
+    })]);
     expect(forbiddenVisibilityFields(body)).toEqual([]);
   });
 

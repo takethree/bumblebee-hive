@@ -418,6 +418,7 @@ tr[data-package-name]:hover {
 }
 
 .status.partial,
+.status.processing,
 .status.attention {
   background: #ffedd5;
   color: var(--warn);

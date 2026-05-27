@@ -5,7 +5,8 @@ const pageSizeStorageKeys = {
   devicePageSize: "hive.devices.page.size",
   runPageSize: "hive.runs.page.size",
   inventoryPageSize: "hive.inventory.page.size",
-  detailInventoryPageSize: "hive.detail.inventory.page.size"
+  detailInventoryPageSize: "hive.detail.inventory.page.size",
+  normalizationPageSize: "hive.normalization.page.size"
 };
 
 const state = {
@@ -20,10 +21,12 @@ const state = {
   runPageSize: storedPageSize("runPageSize"),
   inventoryPageSize: storedPageSize("inventoryPageSize"),
   detailInventoryPageSize: storedPageSize("detailInventoryPageSize"),
+  normalizationPageSize: storedPageSize("normalizationPageSize"),
   devicePage: 1,
   runPage: 1,
   inventoryPage: 1,
-  detailInventoryPage: 1
+  detailInventoryPage: 1,
+  normalizationPage: 1
 };
 
 const el = {
@@ -36,6 +39,13 @@ const el = {
   runStatus: document.querySelector("#run-status"),
   runProfile: document.querySelector("#run-profile"),
   runPageSize: document.querySelector("#run-page-size"),
+  normalizationStatus: document.querySelector("#normalization-status"),
+  normalizationPromoted: document.querySelector("#normalization-promoted"),
+  normalizationDevice: document.querySelector("#normalization-device"),
+  normalizationRun: document.querySelector("#normalization-run"),
+  normalizationPageSize: document.querySelector("#normalization-page-size"),
+  normalizationBody: document.querySelector("#normalization-body"),
+  normalizationPagination: document.querySelector("#normalization-pagination"),
   packageQuery: document.querySelector("#package-query"),
   packageEcosystem: document.querySelector("#package-ecosystem"),
   packageProfile: document.querySelector("#package-profile"),
@@ -63,6 +73,7 @@ const el = {
   detailPackagesPagination: document.querySelector("#detail-packages-pagination"),
   detailInventoryPageSize: document.querySelector("#detail-inventory-page-size"),
   detailRunsBody: document.querySelector("#detail-runs-body"),
+  detailNormalizationBody: document.querySelector("#detail-normalization-body"),
   detailEventsBody: document.querySelector("#detail-events-body"),
   lifecycleReason: document.querySelector("#lifecycle-reason"),
   disableDevice: document.querySelector("#disable-device"),
@@ -97,6 +108,7 @@ function syncPageSizeControls() {
   el.runPageSize.value = String(state.runPageSize);
   el.inventoryPageSize.value = String(state.inventoryPageSize);
   el.detailInventoryPageSize.value = String(state.detailInventoryPageSize);
+  el.normalizationPageSize.value = String(state.normalizationPageSize);
 }
 
 function text(id, value) {
@@ -217,14 +229,20 @@ function applyUrlStateFromLocation() {
   state.runPageSize = pageSizeFromValue(params.get("run_page_size") || params.get("page_size"), storedPageSize("runPageSize"));
   state.inventoryPageSize = pageSizeFromValue(params.get("inventory_page_size") || params.get("page_size"), storedPageSize("inventoryPageSize"));
   state.detailInventoryPageSize = pageSizeFromValue(params.get("detail_inventory_page_size") || params.get("page_size"), storedPageSize("detailInventoryPageSize"));
+  state.normalizationPageSize = pageSizeFromValue(params.get("normalization_page_size") || params.get("page_size"), storedPageSize("normalizationPageSize"));
   syncPageSizeControls();
   state.devicePage = pageFromParams(params, "device_page");
   state.runPage = pageFromParams(params, "run_page");
   state.inventoryPage = pageFromParams(params, "inventory_page");
   state.detailInventoryPage = pageFromParams(params, "detail_inventory_page");
+  state.normalizationPage = pageFromParams(params, "normalization_page");
   setSelectValue(el.deviceStatus, params.get("device_status") || "active", "active");
   setSelectValue(el.runStatus, params.get("run_status") || "", "");
+  setSelectValue(el.normalizationStatus, params.get("normalization_status") || "", "");
+  setSelectValue(el.normalizationPromoted, params.get("normalization_promoted") || "", "");
   el.runProfile.value = params.get("run_profile") || "";
+  el.normalizationDevice.value = params.get("normalization_device") || "";
+  el.normalizationRun.value = params.get("normalization_run") || "";
   el.packageQuery.value = params.get("package_query") || "";
   el.packageEcosystem.value = params.get("ecosystem") || "";
   el.packageProfile.value = params.get("profile") || "";
@@ -276,6 +294,12 @@ function currentAdminPath() {
   setParamIfValue(params, "run_profile", el.runProfile.value.trim());
   setPageSizeParam(params, "run_page_size", state.runPageSize);
   setPageParam(params, "run_page", state.runPage);
+  setParamIfValue(params, "normalization_status", el.normalizationStatus.value);
+  setParamIfValue(params, "normalization_promoted", el.normalizationPromoted.value);
+  setParamIfValue(params, "normalization_device", el.normalizationDevice.value.trim());
+  setParamIfValue(params, "normalization_run", el.normalizationRun.value.trim());
+  setPageSizeParam(params, "normalization_page_size", state.normalizationPageSize);
+  setPageParam(params, "normalization_page", state.normalizationPage);
   if (state.selectedDeviceId) {
     setPageSizeParam(params, "detail_inventory_page_size", state.detailInventoryPageSize);
     setPageParam(params, "detail_inventory_page", state.detailInventoryPage);
@@ -425,6 +449,57 @@ async function loadRuns() {
       <td>${escapeHtml(formatTime(run.received_at))}</td>
     </tr>
   `).join("");
+}
+
+function promotedLabel(value) {
+  return value ? "yes" : "no";
+}
+
+function normalizationCounts(job) {
+  return {
+    records: formatNumber(job.records_seen),
+    packages: formatNumber(job.packages_seen),
+    findings: formatNumber(job.findings_seen)
+  };
+}
+
+function normalizationError(job) {
+  return job.error ? escapeHtml(job.error) : "-";
+}
+
+async function loadNormalizationJobs() {
+  const params = new URLSearchParams({
+    limit: String(state.normalizationPageSize),
+    offset: String(offsetForPage(state.normalizationPage, state.normalizationPageSize))
+  });
+  if (el.normalizationStatus.value) params.set("status", el.normalizationStatus.value);
+  if (el.normalizationPromoted.value) params.set("promoted_current", el.normalizationPromoted.value);
+  if (el.normalizationDevice.value.trim()) params.set("device_id", el.normalizationDevice.value.trim());
+  if (el.normalizationRun.value.trim()) params.set("run_id", el.normalizationRun.value.trim());
+  const data = await getJSON(`/v1/ui/admin/normalization-jobs?${params.toString()}`);
+  state.normalizationPage = data.page || state.normalizationPage;
+  renderPagination(el.normalizationPagination, data, "normalizationPage");
+  if (data.normalization_jobs.length === 0) {
+    el.normalizationBody.innerHTML = '<tr><td colspan="10">No normalization jobs found.</td></tr>';
+    return;
+  }
+  el.normalizationBody.innerHTML = data.normalization_jobs.map((job) => {
+    const counts = normalizationCounts(job);
+    return `
+      <tr data-device-id="${escapeHtml(job.device_id)}">
+        <td>${statusBadge(job.status)}</td>
+        <td title="${escapeHtml(job.device_id)}">${escapeHtml(shortId(job.device_id))}</td>
+        <td title="${escapeHtml(job.run_id)}">${escapeHtml(shortId(job.run_id))}</td>
+        <td>${counts.records}</td>
+        <td>${counts.packages}</td>
+        <td>${counts.findings}</td>
+        <td>${escapeHtml(promotedLabel(job.promoted_current))}</td>
+        <td>${normalizationError(job)}</td>
+        <td>${escapeHtml(formatTime(job.started_at))}</td>
+        <td>${escapeHtml(formatTime(job.completed_at))}</td>
+      </tr>
+    `;
+  }).join("");
 }
 
 function listLabel(values) {
@@ -604,6 +679,22 @@ async function loadDeviceDetail(deviceId) {
         <td>${escapeHtml(formatTime(run.received_at))}</td>
       </tr>
   `).join("");
+  el.detailNormalizationBody.innerHTML = (data.recent_normalization_jobs || []).length === 0
+    ? '<tr><td colspan="7">No recent normalization jobs.</td></tr>'
+    : data.recent_normalization_jobs.map((job) => {
+      const counts = normalizationCounts(job);
+      return `
+        <tr>
+          <td>${statusBadge(job.status)}</td>
+          <td title="${escapeHtml(job.run_id)}">${escapeHtml(shortId(job.run_id))}</td>
+          <td>${counts.records}</td>
+          <td>${counts.packages}</td>
+          <td>${counts.findings}</td>
+          <td>${escapeHtml(promotedLabel(job.promoted_current))}</td>
+          <td>${escapeHtml(formatTime(job.completed_at))}</td>
+        </tr>
+      `;
+    }).join("");
   await Promise.all([loadPackages(), loadRuns()]);
 }
 
@@ -635,7 +726,7 @@ async function loadDevicePackages(deviceId = state.selectedDeviceId) {
 async function refreshAll() {
   el.error.hidden = true;
   try {
-    await Promise.all([loadOverview(), loadHealth(), loadDevices(), loadPackages(), loadRuns()]);
+    await Promise.all([loadOverview(), loadHealth(), loadDevices(), loadPackages(), loadRuns(), loadNormalizationJobs()]);
     el.lastRefresh.textContent = `Last refreshed ${new Date().toLocaleString()}`;
   } catch (error) {
     showError(error);
@@ -707,6 +798,27 @@ el.runProfile.addEventListener("change", () => {
   state.runPage = 1;
   syncUrlState("replace");
   loadRuns();
+});
+el.normalizationPageSize.addEventListener("change", () => setPageSize("normalizationPageSize", "normalizationPage", el.normalizationPageSize, loadNormalizationJobs));
+el.normalizationStatus.addEventListener("change", () => {
+  state.normalizationPage = 1;
+  syncUrlState("replace");
+  loadNormalizationJobs();
+});
+el.normalizationPromoted.addEventListener("change", () => {
+  state.normalizationPage = 1;
+  syncUrlState("replace");
+  loadNormalizationJobs();
+});
+el.normalizationDevice.addEventListener("input", () => {
+  state.normalizationPage = 1;
+  syncUrlState("replace");
+  loadNormalizationJobs();
+});
+el.normalizationRun.addEventListener("input", () => {
+  state.normalizationPage = 1;
+  syncUrlState("replace");
+  loadNormalizationJobs();
 });
 el.inventoryPageSize.addEventListener("change", () => setPageSize("inventoryPageSize", "inventoryPage", el.inventoryPageSize, loadPackages));
 el.packageQuery.addEventListener("input", () => {
@@ -798,6 +910,14 @@ el.packagesPagination.addEventListener("click", (event) => {
 el.runsPagination.addEventListener("click", (event) => {
   const button = event.target.closest("button[data-page]");
   if (button) setPage("runPage", button.dataset.page, loadRuns);
+});
+el.normalizationPagination.addEventListener("click", (event) => {
+  const button = event.target.closest("button[data-page]");
+  if (button) setPage("normalizationPage", button.dataset.page, loadNormalizationJobs);
+});
+el.normalizationBody.addEventListener("click", (event) => {
+  const row = event.target.closest("tr[data-device-id]");
+  if (row) selectDevice(row.dataset.deviceId);
 });
 el.detailPackagesPagination.addEventListener("click", (event) => {
   const button = event.target.closest("button[data-page]");

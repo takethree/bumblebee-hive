@@ -48,13 +48,15 @@ drill-down state is recoverable in the same admin route with query parameters
 such as `selected_package`, `selected_ecosystem`, `selected_profile`, and
 `selected_device`. The UI also preserves key filters in query parameters such
 as `device_status`, `inventory_view`, `package_query`, `ecosystem`, `profile`,
-`run_status`, and `run_profile`. Numbered table pages are recoverable through
-`device_page`, `inventory_page`, `run_page`, and `detail_inventory_page`. The
+`run_status`, `run_profile`, `normalization_status`,
+`normalization_promoted`, `normalization_device`, and `normalization_run`.
+Numbered table pages are recoverable through `device_page`, `inventory_page`,
+`run_page`, `normalization_page`, and `detail_inventory_page`. The
 UI defaults to 10 rows per page and lets operators choose 10, 25, 50, or 100
 rows next to each paginated list. Non-default choices are recoverable through
-`device_page_size`, `inventory_page_size`, `run_page_size`, and
-`detail_inventory_page_size`. Auto-refresh remains local browser state and is
-not encoded in the URL.
+`device_page_size`, `inventory_page_size`, `run_page_size`,
+`normalization_page_size`, and `detail_inventory_page_size`. Auto-refresh
+remains local browser state and is not encoded in the URL.
 
 Configure these Worker values before using the UI:
 
@@ -278,6 +280,7 @@ Supported endpoints:
 - `GET /v1/admin/devices?status=active|disabled|all&limit=50&offset=0`
 - `GET /v1/admin/devices/<device-id>`
 - `GET /v1/admin/runs?device_id=<device-id>&status=complete&profile=baseline&limit=50&offset=0`
+- `GET /v1/admin/normalization-jobs?status=complete&device_id=<device-id>&run_id=<run-id>&promoted_current=true&limit=50&offset=0`
 - `GET /v1/admin/packages?query=<name>&ecosystem=npm&profile=baseline&view=package|summary|observations&limit=50&offset=0`
 - `GET /v1/admin/packages/detail?name=<normalized-name>&ecosystem=npm&profile=baseline&device_id=<device-id>`
 - `GET /v1/admin/devices/<device-id>/packages?profile=baseline&view=package|summary|observations&limit=50&offset=0`
@@ -378,6 +381,48 @@ Example response:
 }
 ```
 
+Example normalization job list:
+
+```powershell
+Invoke-RestMethod `
+  -Uri "https://hive.example.com/v1/admin/normalization-jobs?status=error&limit=50&offset=0" `
+  -Headers $headers
+```
+
+Example response:
+
+```json
+{
+  "normalization_jobs": [
+    {
+      "batch_id": "batch-redacted",
+      "device_id": "device-redacted",
+      "run_id": "run-redacted",
+      "status": "error",
+      "records_seen": 0,
+      "packages_seen": 0,
+      "findings_seen": 0,
+      "promoted_current": false,
+      "error": "[redacted-path]",
+      "started_at": "2026-05-27T10:00:00.000Z",
+      "completed_at": "2026-05-27T10:00:01.000Z"
+    }
+  ],
+  "limit": 50,
+  "offset": 0,
+  "total": 1,
+  "page": 1,
+  "page_count": 1,
+  "has_more": false,
+  "filters": {
+    "status": "error",
+    "device_id": null,
+    "run_id": null,
+    "promoted_current": null
+  }
+}
+```
+
 These endpoints intentionally do not expose raw inventory records, `summary_json`,
 R2 object keys, body hashes, HMAC key material, Access credentials, local user
 names, SIDs, hostnames, or profile paths. Use R2/D1 operator tooling separately
@@ -388,6 +433,12 @@ for break-glass forensic access to raw batches.
 Hive normalizes accepted Bumblebee `package` and `finding` records from raw R2
 batches into D1 through the `NORMALIZE_QUEUE` consumer. Raw batches remain the
 source of truth; normalized tables are the operator query surface.
+
+Normalization job visibility is read-only and metadata-only. It shows job
+status, batch/device/run IDs, record/package/finding counts, whether current
+inventory was promoted, a sanitized error string, and start/complete
+timestamps. It does not expose raw batch content, R2 object keys, local paths,
+retry/replay/delete controls, or queue mutation.
 
 Current package state is promoted only after Hive sees a matching
 `scan_summary.status=complete`. `baseline` and `project` runs can promote

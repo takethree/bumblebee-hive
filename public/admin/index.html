@@ -192,6 +192,24 @@
             <tbody id="detail-runs-body"></tbody>
           </table>
         </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Status</th>
+                <th>Run</th>
+                <th>Records</th>
+                <th>Packages</th>
+                <th>Findings</th>
+                <th>Promoted</th>
+                <th>Completed</th>
+              </tr>
+            </thead>
+            <tbody id="detail-normalization-body">
+              <tr><td colspan="7">No recent normalization jobs.</td></tr>
+            </tbody>
+          </table>
+        </div>
       </section>
 
       <section class="panel">
@@ -299,6 +317,70 @@
             </table>
           </div>
         </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-header">
+          <h2>Normalization</h2>
+          <div class="filters">
+            <label>
+              Rows
+              <select id="normalization-page-size">
+                <option value="10">10</option>
+                <option value="25">25</option>
+                <option value="50">50</option>
+                <option value="100">100</option>
+              </select>
+            </label>
+            <label>
+              Status
+              <select id="normalization-status">
+                <option value="">Any</option>
+                <option value="processing">Processing</option>
+                <option value="complete">Complete</option>
+                <option value="error">Error</option>
+              </select>
+            </label>
+            <label>
+              Promoted
+              <select id="normalization-promoted">
+                <option value="">Any</option>
+                <option value="true">Yes</option>
+                <option value="false">No</option>
+              </select>
+            </label>
+            <label>
+              Device
+              <input id="normalization-device" type="text" placeholder="device id">
+            </label>
+            <label>
+              Run
+              <input id="normalization-run" type="text" placeholder="run id">
+            </label>
+          </div>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Status</th>
+                <th>Device</th>
+                <th>Run</th>
+                <th>Records</th>
+                <th>Packages</th>
+                <th>Findings</th>
+                <th>Promoted</th>
+                <th>Error</th>
+                <th>Started</th>
+                <th>Completed</th>
+              </tr>
+            </thead>
+            <tbody id="normalization-body">
+              <tr><td colspan="10">Loading normalization jobs...</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <nav id="normalization-pagination" class="pagination" aria-label="Normalization job pages"></nav>
       </section>
 
       <section class="panel">

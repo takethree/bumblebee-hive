@@ -1,0 +1,257 @@
+# GoalBuddy v2 state.yaml
+# Board truth lives here. goal.md is the editable charter; notes/ holds long receipts only.
+
+version: 2
+
+goal:
+  title: "Hive Normalization Visibility"
+  slug: "hive-normalization-visibility"
+  kind: existing_plan
+  tranche: "Validate and implement metadata-only normalization job visibility in Hive."
+  status: done
+  oracle:
+    signal: "Hive exposes metadata-only normalization job visibility in API and UI, with filters, pagination, selected-device context, tests for success/error/promoted states, docs, and no forbidden raw fields."
+    cadence: "after each Worker package and at final audit"
+    final_proof: "Passing tests/typecheck plus final audit mapping implementation and docs to the metadata-only normalization visibility oracle."
+  intake:
+    original_request: "Goal prep for the next Hive normalization/job visibility plan."
+    interpreted_outcome: "Hive operators can diagnose missing or stale inventory by seeing normalization job status without raw batch access."
+    input_shape: existing_plan
+    audience: "Hive operators"
+    authority: approved
+    proof_type: test
+    completion_proof: "API/UI tests pass, TypeScript passes, README is updated, and final audit confirms metadata-only normalization visibility behavior."
+    likely_misfire: "Building queue mutation, retry, replay, or raw batch inspection instead of read-only operator visibility."
+    blind_spots_considered:
+      - "D1 query performance for recent/status/device lookups."
+      - "Safe error display without raw paths or object keys."
+      - "Selected-device context."
+      - "URL recovery for filters and pagination."
+      - "Data minimization."
+      - "Separating local implementation from remote migration/deploy unless explicitly requested."
+    existing_plan_facts:
+      - "Add /v1/admin/normalization-jobs with status, device_id, run_id, promoted_current, limit, and offset filters."
+      - "Add /v1/ui/admin/normalization-jobs with the same read-only metadata surface."
+      - "Return only safe metadata: batch_id, device_id, run_id, status, counts, promoted_current, sanitized error, started_at, completed_at, and pagination metadata."
+      - "Add recent_normalization_jobs to device detail responses."
+      - "Add a small D1 index migration for recent/status/device job lookup."
+      - "Add an Admin UI Normalization panel with filters, 10-row default pagination, and status badges."
+      - "Add a compact normalization jobs table inside selected-device detail."
+      - "Do not add retry, replay, delete, queue mutation, raw batch access, or R2 object-key display."
+
+rules:
+  pm_owns_state: true
+  one_active_task: true
+  max_write_workers: 1
+  no_implementation_without_worker_or_pm_task: true
+  no_completion_without_judge_or_pm_audit: true
+  planning_is_not_completion: true
+  queued_required_worker_blocks_completion: true
+  continuous_until_full_outcome: true
+  missing_input_or_credentials_do_not_stop_goal: true
+  preserve_and_validate_existing_plan: true
+  intake_misfire_must_be_audited: true
+  goal_pressure_requires_oracle: true
+  no_completion_on_weak_proof: true
+  slice_policy:
+    max_consecutive_tiny_tasks: 2
+    prefer_vertical_slices: true
+    judge_picks_largest_safe_slice: true
+    worker_completes_whole_slice: true
+
+agents:
+  scout: bundled_not_installed
+  worker: bundled_not_installed
+  judge: bundled_not_installed
+
+visual_board:
+  selected: local
+  local:
+    status: blocked
+    url: "http://goalbuddy.localhost:41737/hive-normalization-visibility/"
+    command: "npx goalbuddy board docs/goals/hive-normalization-visibility"
+    error: "Installed goalbuddy CLI failed before starting the board: catalog fetch returned HTTP 404."
+
+active_task: null
+
+tasks:
+  - id: T001
+    type: judge
+    assignee: Judge
+    status: done
+    reasoning_hint: high
+    objective: "Validate the normalization visibility plan against current Hive routes, schema, UI state, tests, migration conventions, and metadata-only constraints."
+    inputs:
+      - "docs/goals/hive-normalization-visibility/goal.md"
+      - "src/index.ts"
+      - "migrations"
+      - "public/admin/app.js"
+      - "public/admin/index.html"
+      - "public/admin/styles.css"
+      - "test/ingest.test.ts"
+      - "test/admin-url-state.test.ts"
+      - "README.md"
+    constraints:
+      - "Read-only."
+      - "Do not implement."
+      - "Keep Hive generic and metadata-only."
+      - "Reject retry/replay/delete/queue mutation or raw batch inspection in this tranche."
+      - "Reject any approach that exposes raw inventory fields, object keys, hostnames, usernames, SIDs, local paths, HMAC material, Access credentials, or Take3-specific behavior."
+    expected_output:
+      - "Decision: approve | revise | block."
+      - "Exact endpoint and UI approach."
+      - "Whether a D1 index migration is required."
+      - "Exact Worker objective."
+      - "allowed_files."
+      - "verify commands."
+      - "stop_if conditions."
+    receipt:
+      result: done
+      decision: approved
+      endpoint_and_ui_approach: "Add parallel read-only /v1/admin/normalization-jobs and /v1/ui/admin/normalization-jobs endpoints, add recent_normalization_jobs to device detail, add a global Normalization panel and selected-device normalization table."
+      migration_required: true
+      migration_reason: "normalization_jobs currently has only batch_id primary key; recent/status/device list views should have additive indexes for started_at, device_id+started_at, and status+started_at."
+      worker_objective: "Implement the metadata-only normalization visibility API, UI, docs, tests, and additive indexes."
+      allowed_files:
+        - "src/index.ts"
+        - "migrations/0006_normalization_job_visibility_indexes.sql"
+        - "public/admin/index.html"
+        - "public/admin/app.js"
+        - "public/admin/styles.css"
+        - "test/ingest.test.ts"
+        - "test/admin-url-state.test.ts"
+        - "README.md"
+      verify:
+        - "npm.cmd test"
+        - "npm.cmd run typecheck"
+        - "git diff --check"
+      stop_if:
+        - "Need files outside allowed_files."
+        - "Need a destructive migration or production data deletion."
+        - "The design would expose forbidden raw fields or object keys."
+        - "The implementation would mutate queue/jobs rather than providing read-only visibility."
+        - "URL-state behavior is ambiguous."
+        - "Verification fails twice for the same reason."
+
+  - id: T002
+    type: worker
+    assignee: Worker
+    status: done
+    reasoning_hint: medium
+    objective: "Implement the Judge-approved metadata-only normalization visibility slice."
+    allowed_files:
+      - "src/index.ts"
+      - "migrations/0006_normalization_job_visibility_indexes.sql"
+      - "public/admin/index.html"
+      - "public/admin/app.js"
+      - "public/admin/styles.css"
+      - "test/ingest.test.ts"
+      - "test/admin-url-state.test.ts"
+      - "README.md"
+    verify:
+      - "npm.cmd test"
+      - "npm.cmd run typecheck"
+      - "git diff --check"
+    stop_if:
+      - "Need files outside allowed_files."
+      - "Need a destructive migration or production data deletion."
+      - "The design would expose forbidden raw fields or object keys."
+      - "The implementation would mutate queue/jobs rather than providing read-only visibility."
+      - "URL-state behavior is ambiguous."
+      - "Verification fails twice for the same reason."
+    receipt:
+      result: done
+      changed_files:
+        - "src/index.ts"
+        - "migrations/0006_normalization_job_visibility_indexes.sql"
+        - "public/admin/index.html"
+        - "public/admin/app.js"
+        - "public/admin/styles.css"
+        - "test/ingest.test.ts"
+        - "test/admin-url-state.test.ts"
+        - "README.md"
+      commands:
+        - cmd: "npm.cmd test"
+          status: pass
+          summary: "3 test files passed; 47 tests passed."
+        - cmd: "npm.cmd run typecheck"
+          status: pass
+          summary: "tsc --noEmit passed."
+        - cmd: "git diff --check"
+          status: pass
+          summary: "No whitespace errors; Git reported line-ending warnings only."
+      summary: "Added metadata-only normalization job API/UI visibility, selected-device recent normalization context, additive D1 indexes, README docs, and tests for complete/error/promoted UI/API behavior."
+
+  - id: T003
+    type: judge
+    assignee: Judge
+    status: done
+    reasoning_hint: high
+    objective: "Review the implemented normalization visibility for correctness, maintainability, metadata-only safety, and test coverage."
+    inputs:
+      - "T002 receipt"
+      - "Current diff"
+      - "Test output"
+    constraints:
+      - "Read-only."
+      - "Do not implement."
+      - "Do not call the tranche complete unless API, UI, docs, tests, and migration all map back to the oracle."
+    expected_output:
+      - "Decision: accept | request_changes | block."
+      - "Safety assessment for forbidden raw fields and job error display."
+      - "Migration safety assessment."
+      - "Maintenance risk assessment."
+      - "Any required follow-up Worker task."
+    receipt:
+      result: done
+      decision: accept
+      safety_assessment: "The new visibility returns job metadata only: batch/device/run IDs, status, counts, promoted_current, sanitized error, and timestamps. Tests assert forbidden raw fields are absent and error strings redact local paths/object-key-like values."
+      migration_safety: "0006 adds only IF NOT EXISTS indexes on normalization_jobs started/status/device lookup paths; no destructive schema or data changes."
+      maintenance_risk: "Low for this tranche: routes reuse existing admin/UI auth helpers, pagination helpers, table conventions, and URL-state patterns."
+      full_outcome_complete: false
+      follow_up: "Final audit required before goal completion."
+
+  - id: T999
+    type: judge
+    assignee: Judge
+    status: done
+    reasoning_hint: high
+    objective: "Audit whether the normalization visibility tranche is complete."
+    inputs:
+      - "All done task receipts"
+      - "Last verification"
+      - "Current dirty diff"
+      - "docs/goals/hive-normalization-visibility/goal.md"
+    constraints:
+      - "Do not implement."
+      - "Reject completion if required Worker work is still queued or active."
+      - "Reject completion if normalization visibility is not metadata-only."
+      - "Reject completion if retry/replay/delete/queue mutation was added."
+      - "Reject completion if docs, tests, or migration coverage are missing."
+    expected_output:
+      - "complete | not_complete"
+      - "full_outcome_complete: true | false"
+      - "missing evidence"
+      - "next task if not complete"
+    receipt:
+      result: done
+      decision: complete
+      full_outcome_complete: true
+      missing_evidence: []
+      summary: "The tranche satisfies the oracle: API and UI expose read-only normalization job visibility with filters, pagination, selected-device context, tests for success/error/promoted states, docs, additive indexes, and no retry/replay/delete/raw-batch controls."
+
+checks:
+  dirty_fingerprint: "README.md; public/admin/app.js; public/admin/index.html; public/admin/styles.css; src/index.ts; test/admin-url-state.test.ts; test/ingest.test.ts; migrations/0006_normalization_job_visibility_indexes.sql; docs/goals/hive-normalization-visibility/"
+  last_verification:
+    result: pass
+    task: T002
+    commands:
+      - cmd: "npm.cmd test"
+        status: pass
+        summary: "3 test files passed; 47 tests passed."
+      - cmd: "npm.cmd run typecheck"
+        status: pass
+        summary: "tsc --noEmit passed."
+      - cmd: "git diff --check"
+        status: pass
+        summary: "No whitespace errors; Git reported line-ending warnings only."

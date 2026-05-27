@@ -126,6 +126,20 @@ interface AdminLifecycleEventRow {
   created_at: string;
 }
 
+interface AdminNormalizationJobRow {
+  batch_id: string;
+  device_id: string;
+  run_id: string;
+  status: string;
+  records_seen: number;
+  packages_seen: number;
+  findings_seen: number;
+  promoted_current: number;
+  error: string | null;
+  started_at: string;
+  completed_at: string | null;
+}
+
 interface RetentionBatchRow {
   batch_id: string;
   object_key: string;
@@ -374,6 +388,12 @@ export default {
       }
       if (request.method === "GET" && url.pathname === "/v1/ui/admin/runs") {
         return await uiAdminRuns(request, env, url);
+      }
+      if (request.method === "GET" && url.pathname === "/v1/admin/normalization-jobs") {
+        return await adminNormalizationJobs(request, env, url);
+      }
+      if (request.method === "GET" && url.pathname === "/v1/ui/admin/normalization-jobs") {
+        return await uiAdminNormalizationJobs(request, env, url);
       }
       if (request.method === "GET" && url.pathname === "/v1/admin/packages/detail") {
         return await adminPackageDetail(request, env, url);
@@ -1042,10 +1062,14 @@ async function adminDeviceDetailData(env: Env, rawDeviceID: string): Promise<obj
       "SELECT event_id, device_id, action, actor_type, actor_id, reason, previous_disabled_at, new_disabled_at, created_at FROM device_lifecycle_events WHERE device_id = ? ORDER BY created_at DESC LIMIT 10"
     ).bind(deviceID)
   );
+  const normalizationJobs = await allRows<AdminNormalizationJobRow>(
+    env.DB.prepare(`${adminNormalizationJobSelect()} WHERE device_id = ? ORDER BY started_at DESC LIMIT 10`).bind(deviceID)
+  );
 
   return {
     device: formatAdminDeviceRow(device),
     recent_runs: rowsWithCounts(runs),
+    recent_normalization_jobs: normalizationJobs.map(formatNormalizationJobRow),
     lifecycle_events: lifecycleEvents.map(formatLifecycleEventRow)
   };
 }
@@ -1091,6 +1115,69 @@ async function adminRunsData(env: Env, url: URL): Promise<object> {
   return {
     runs: rowsWithCounts(rows),
     ...paginationMeta(count?.total || 0, limit, offset)
+  };
+}
+
+async function adminNormalizationJobs(request: Request, env: Env, url: URL): Promise<Response> {
+  requireAdminRequest(request, env);
+  return adminJson(await adminNormalizationJobsData(env, url));
+}
+
+async function uiAdminNormalizationJobs(request: Request, env: Env, url: URL): Promise<Response> {
+  await requireUIAdminRequest(request, env);
+  return adminJson(await adminNormalizationJobsData(env, url));
+}
+
+async function adminNormalizationJobsData(env: Env, url: URL): Promise<object> {
+  const where: string[] = [];
+  const values: (string | number)[] = [];
+  const deviceID = url.searchParams.get("device_id");
+  if (deviceID) {
+    const sanitized = sanitizeDeviceID(deviceID);
+    if (!sanitized) {
+      throw new HttpError(400, "invalid_device_id");
+    }
+    where.push("device_id = ?");
+    values.push(sanitized);
+  }
+  const runID = textField(url.searchParams.get("run_id") || "");
+  if (runID) {
+    where.push("run_id = ?");
+    values.push(runID);
+  }
+  const status = url.searchParams.get("status") || "";
+  if (status) {
+    if (!["processing", "complete", "error"].includes(status)) {
+      throw new HttpError(400, "invalid_normalization_status");
+    }
+    where.push("status = ?");
+    values.push(status);
+  }
+  const promotedCurrent = url.searchParams.get("promoted_current") || "";
+  if (promotedCurrent) {
+    if (!["true", "false"].includes(promotedCurrent)) {
+      throw new HttpError(400, "invalid_promoted_current");
+    }
+    where.push("promoted_current = ?");
+    values.push(promotedCurrent === "true" ? 1 : 0);
+  }
+  const limit = boundedIntParam(url.searchParams, "limit", 50, 100);
+  const offset = boundedIntParam(url.searchParams, "offset", 0, 100000);
+  const whereSQL = where.length ? `WHERE ${where.join(" AND ")}` : "";
+  const count = await env.DB.prepare(`SELECT COUNT(*) AS total FROM normalization_jobs ${whereSQL}`).bind(...values).first<CountRow>();
+  const rows = await allRows<AdminNormalizationJobRow>(
+    env.DB.prepare(`${adminNormalizationJobSelect()} ${whereSQL} ORDER BY started_at DESC LIMIT ? OFFSET ?`).bind(...values, limit, offset)
+  );
+
+  return {
+    normalization_jobs: rows.map(formatNormalizationJobRow),
+    ...paginationMeta(count?.total || 0, limit, offset),
+    filters: {
+      status: status || null,
+      device_id: deviceID ? sanitizeDeviceID(deviceID) : null,
+      run_id: runID || null,
+      promoted_current: promotedCurrent || null
+    }
   };
 }
 
@@ -1322,6 +1409,22 @@ function adminRunSelect(): string {
     (SELECT COUNT(*) FROM batches b WHERE b.device_id = r.device_id AND b.run_id = r.run_id) AS batch_count,
     (SELECT SUM(record_count) FROM batches b WHERE b.device_id = r.device_id AND b.run_id = r.run_id) AS record_count
   FROM runs r`;
+}
+
+function adminNormalizationJobSelect(): string {
+  return `SELECT
+    batch_id,
+    device_id,
+    run_id,
+    status,
+    records_seen,
+    packages_seen,
+    findings_seen,
+    promoted_current,
+    error,
+    started_at,
+    completed_at
+  FROM normalization_jobs`;
 }
 
 function adminPackageSelect(): string {
@@ -1734,6 +1837,33 @@ function rowsWithCounts(rows: AdminRunRow[]): object[] {
     batch_count: row.batch_count || 0,
     record_count: row.record_count || 0
   }));
+}
+
+function formatNormalizationJobRow(row: AdminNormalizationJobRow): object {
+  return {
+    batch_id: row.batch_id,
+    device_id: row.device_id,
+    run_id: row.run_id,
+    status: row.status,
+    records_seen: row.records_seen || 0,
+    packages_seen: row.packages_seen || 0,
+    findings_seen: row.findings_seen || 0,
+    promoted_current: !!row.promoted_current,
+    error: safeNormalizationError(row.error),
+    started_at: row.started_at,
+    completed_at: row.completed_at
+  };
+}
+
+function safeNormalizationError(error: string | null): string | null {
+  if (!error) {
+    return null;
+  }
+  return error
+    .replace(/[A-Za-z]:[\\/][^\s"'<>]+/g, "[redacted-path]")
+    .replace(/\/[^\s"'<>]+/g, "[redacted-path]")
+    .replace(/[A-Za-z0-9._:-]+\/[A-Za-z0-9._:-]+\/[A-Fa-f0-9]{32,}\.ndjson(?:\.gz)?/g, "[redacted-object-key]")
+    .slice(0, 500);
 }
 
 function formatLifecycleEventRow(row: AdminLifecycleEventRow): object {
