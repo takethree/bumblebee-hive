@@ -220,6 +220,53 @@ interface NormalizedPackageFamilyRow {
 
 type PackageView = "package" | "summary" | "observations";
 
+interface PackageDetailAccumulator {
+  package_name: string;
+  normalized_name: string;
+  ecosystem: string;
+  profiles: Set<string>;
+  devices: Set<string>;
+  versions: Set<string>;
+  total_occurrence_count: number;
+  package_managers: Set<string>;
+  source_types: Set<string>;
+  root_kinds: Set<string>;
+  direct_dependency_seen: boolean;
+  direct_dependency_present: boolean;
+  has_lifecycle_scripts: boolean;
+  latest_observed_at: string;
+  latest_run_id: string | null;
+}
+
+interface PackageDetailVersionAccumulator {
+  version: string | null;
+  devices: Set<string>;
+  occurrence_count: number;
+  package_managers: Set<string>;
+  source_types: Set<string>;
+  root_kinds: Set<string>;
+  direct_dependency_seen: boolean;
+  direct_dependency_present: boolean;
+  has_lifecycle_scripts: boolean;
+  latest_observed_at: string;
+  latest_run_id: string | null;
+}
+
+interface PackageDetailDeviceAccumulator {
+  device_id: string;
+  profile: string;
+  versions: Set<string>;
+  total_occurrence_count: number;
+  package_managers: Set<string>;
+  source_types: Set<string>;
+  root_kinds: Set<string>;
+  direct_dependency_seen: boolean;
+  direct_dependency_present: boolean;
+  has_lifecycle_scripts: boolean;
+  latest_observed_at: string;
+  latest_run_id: string | null;
+}
+
 interface NormalizationResult {
   recordsSeen: number;
   packagesSeen: number;
@@ -327,6 +374,12 @@ export default {
       }
       if (request.method === "GET" && url.pathname === "/v1/ui/admin/runs") {
         return await uiAdminRuns(request, env, url);
+      }
+      if (request.method === "GET" && url.pathname === "/v1/admin/packages/detail") {
+        return await adminPackageDetail(request, env, url);
+      }
+      if (request.method === "GET" && url.pathname === "/v1/ui/admin/packages/detail") {
+        return await uiAdminPackageDetail(request, env, url);
       }
       if (request.method === "GET" && url.pathname === "/v1/admin/packages") {
         return await adminPackages(request, env, url);
@@ -1061,6 +1114,16 @@ async function uiAdminDevicePackages(request: Request, env: Env, rawDeviceID: st
   return adminJson(await adminPackagesData(env, url, rawDeviceID));
 }
 
+async function adminPackageDetail(request: Request, env: Env, url: URL): Promise<Response> {
+  requireAdminRequest(request, env);
+  return adminJson(await adminPackageDetailData(env, url));
+}
+
+async function uiAdminPackageDetail(request: Request, env: Env, url: URL): Promise<Response> {
+  await requireUIAdminRequest(request, env);
+  return adminJson(await adminPackageDetailData(env, url));
+}
+
 async function adminPackagesData(env: Env, url: URL, rawDeviceID: string | null): Promise<object> {
   const requestedView = url.searchParams.get("view") || "summary";
   if (!isPackageView(requestedView)) {
@@ -1104,6 +1167,53 @@ async function adminPackagesData(env: Env, url: URL, rawDeviceID: string | null)
     query,
     device_id: deviceParam ? sanitizeDeviceID(deviceParam) : null
   };
+}
+
+async function adminPackageDetailData(env: Env, url: URL): Promise<object> {
+  const name = textField(url.searchParams.get("name") || url.searchParams.get("package") || "");
+  const ecosystem = textField(url.searchParams.get("ecosystem") || "");
+  if (!name) {
+    throw new HttpError(400, "missing_package_name");
+  }
+  if (!ecosystem) {
+    throw new HttpError(400, "missing_ecosystem");
+  }
+
+  const where: string[] = [];
+  const values: (string | number)[] = [];
+  const deviceParam = url.searchParams.get("device_id");
+  if (deviceParam) {
+    const deviceID = sanitizeDeviceID(deviceParam);
+    if (!deviceID) {
+      throw new HttpError(400, "invalid_device_id");
+    }
+    where.push("device_id = ?");
+    values.push(deviceID);
+  }
+  where.push("ecosystem = ?");
+  values.push(ecosystem);
+  const profile = textField(url.searchParams.get("profile") || "");
+  if (profile) {
+    where.push("profile = ?");
+    values.push(profile);
+  }
+  where.push("normalized_name = ?");
+  values.push(name);
+
+  const observationLimit = boundedIntParam(url.searchParams, "observation_limit", 5000, 10000);
+  const rows = await allRows<NormalizedPackageRow>(
+    env.DB.prepare(`${adminPackageSelect()} WHERE ${where.join(" AND ")} ORDER BY observed_at DESC, device_id ASC, version ASC LIMIT ?`).bind(...values, observationLimit)
+  );
+  if (rows.length === 0) {
+    throw new HttpError(404, "package_detail_not_found");
+  }
+  return formatPackageDetailRows(rows, {
+    name,
+    ecosystem,
+    profile: profile || null,
+    device_id: deviceParam ? sanitizeDeviceID(deviceParam) : null,
+    observation_limit: observationLimit
+  });
 }
 
 function isPackageView(view: string): view is PackageView {
@@ -1421,6 +1531,184 @@ function formatPackageVersionRow(row: NormalizedPackageSummaryRow): object {
     latest_run_id: row.latest_run_id,
     observed_at: row.latest_observed_at
   };
+}
+
+function formatPackageDetailRows(
+  rows: NormalizedPackageRow[],
+  filters: { name: string; ecosystem: string; profile: string | null; device_id: string | null; observation_limit: number }
+): object {
+  const first = rows[0];
+  const summary: PackageDetailAccumulator = {
+    package_name: first.package_name,
+    normalized_name: first.normalized_name,
+    ecosystem: first.ecosystem,
+    profiles: new Set<string>(),
+    devices: new Set<string>(),
+    versions: new Set<string>(),
+    total_occurrence_count: 0,
+    package_managers: new Set<string>(),
+    source_types: new Set<string>(),
+    root_kinds: new Set<string>(),
+    direct_dependency_seen: false,
+    direct_dependency_present: false,
+    has_lifecycle_scripts: false,
+    latest_observed_at: first.observed_at,
+    latest_run_id: first.run_id
+  };
+  const versions = new Map<string, PackageDetailVersionAccumulator>();
+  const devices = new Map<string, PackageDetailDeviceAccumulator>();
+
+  for (const row of rows) {
+    addPackageDetailSummary(summary, row);
+
+    const versionKey = row.version || "";
+    let version = versions.get(versionKey);
+    if (!version) {
+      version = {
+        version: row.version,
+        devices: new Set<string>(),
+        occurrence_count: 0,
+        package_managers: new Set<string>(),
+        source_types: new Set<string>(),
+        root_kinds: new Set<string>(),
+        direct_dependency_seen: false,
+        direct_dependency_present: false,
+        has_lifecycle_scripts: false,
+        latest_observed_at: row.observed_at,
+        latest_run_id: row.run_id
+      };
+      versions.set(versionKey, version);
+    }
+    addPackageDetailVersion(version, row);
+
+    const deviceKey = `${row.device_id}\u001f${row.profile}`;
+    let device = devices.get(deviceKey);
+    if (!device) {
+      device = {
+        device_id: row.device_id,
+        profile: row.profile,
+        versions: new Set<string>(),
+        total_occurrence_count: 0,
+        package_managers: new Set<string>(),
+        source_types: new Set<string>(),
+        root_kinds: new Set<string>(),
+        direct_dependency_seen: false,
+        direct_dependency_present: false,
+        has_lifecycle_scripts: false,
+        latest_observed_at: row.observed_at,
+        latest_run_id: row.run_id
+      };
+      devices.set(deviceKey, device);
+    }
+    addPackageDetailDevice(device, row);
+  }
+
+  return {
+    filters,
+    package: {
+      package_name: summary.package_name,
+      normalized_name: summary.normalized_name,
+      ecosystem: summary.ecosystem,
+      profiles: sortedSet(summary.profiles),
+      device_count: summary.devices.size,
+      version_count: summary.versions.size,
+      total_occurrence_count: summary.total_occurrence_count,
+      package_managers: sortedSet(summary.package_managers),
+      source_types: sortedSet(summary.source_types),
+      root_kinds: sortedSet(summary.root_kinds),
+      direct_dependency_present: booleanOrNull(summary.direct_dependency_seen, summary.direct_dependency_present),
+      has_lifecycle_scripts: summary.has_lifecycle_scripts,
+      latest_observed_at: summary.latest_observed_at,
+      latest_run_id: summary.latest_run_id
+    },
+    versions: [...versions.values()]
+      .sort((left, right) => String(left.version || "").localeCompare(String(right.version || "")))
+      .map((version) => ({
+        version: version.version,
+        device_count: version.devices.size,
+        occurrence_count: version.occurrence_count,
+        package_managers: sortedSet(version.package_managers),
+        source_types: sortedSet(version.source_types),
+        root_kinds: sortedSet(version.root_kinds),
+        direct_dependency_present: booleanOrNull(version.direct_dependency_seen, version.direct_dependency_present),
+        has_lifecycle_scripts: version.has_lifecycle_scripts,
+        latest_observed_at: version.latest_observed_at,
+        latest_run_id: version.latest_run_id
+      })),
+    devices: [...devices.values()]
+      .sort((left, right) => left.device_id.localeCompare(right.device_id) || left.profile.localeCompare(right.profile))
+      .map((device) => ({
+        device_id: device.device_id,
+        profile: device.profile,
+        versions: sortedSet(device.versions),
+        version_count: device.versions.size,
+        total_occurrence_count: device.total_occurrence_count,
+        package_managers: sortedSet(device.package_managers),
+        source_types: sortedSet(device.source_types),
+        root_kinds: sortedSet(device.root_kinds),
+        direct_dependency_present: booleanOrNull(device.direct_dependency_seen, device.direct_dependency_present),
+        has_lifecycle_scripts: device.has_lifecycle_scripts,
+        latest_observed_at: device.latest_observed_at,
+        latest_run_id: device.latest_run_id
+      })),
+    observation_count: rows.length,
+    truncated: rows.length >= filters.observation_limit
+  };
+}
+
+function addPackageDetailSummary(summary: PackageDetailAccumulator, row: NormalizedPackageRow): void {
+  summary.profiles.add(row.profile);
+  summary.devices.add(row.device_id);
+  summary.versions.add(row.version || "");
+  summary.total_occurrence_count++;
+  addCommonPackageDetail(summary, row);
+}
+
+function addPackageDetailVersion(version: PackageDetailVersionAccumulator, row: NormalizedPackageRow): void {
+  version.devices.add(row.device_id);
+  version.occurrence_count++;
+  addCommonPackageDetail(version, row);
+}
+
+function addPackageDetailDevice(device: PackageDetailDeviceAccumulator, row: NormalizedPackageRow): void {
+  device.versions.add(row.version || "");
+  device.total_occurrence_count++;
+  addCommonPackageDetail(device, row);
+}
+
+function addCommonPackageDetail(
+  target: {
+    package_managers: Set<string>;
+    source_types: Set<string>;
+    root_kinds: Set<string>;
+    direct_dependency_seen: boolean;
+    direct_dependency_present: boolean;
+    has_lifecycle_scripts: boolean;
+    latest_observed_at: string;
+    latest_run_id: string | null;
+  },
+  row: NormalizedPackageRow
+): void {
+  if (row.package_manager) target.package_managers.add(row.package_manager);
+  if (row.source_type) target.source_types.add(row.source_type);
+  if (row.root_kind) target.root_kinds.add(row.root_kind);
+  if (row.direct_dependency !== null && row.direct_dependency !== undefined) {
+    target.direct_dependency_seen = true;
+    target.direct_dependency_present ||= !!row.direct_dependency;
+  }
+  target.has_lifecycle_scripts ||= !!row.has_lifecycle_scripts;
+  if (row.observed_at >= target.latest_observed_at) {
+    target.latest_observed_at = row.observed_at;
+    target.latest_run_id = row.run_id;
+  }
+}
+
+function sortedSet(values: Set<string>): string[] {
+  return [...values].filter(Boolean).sort((left, right) => left.localeCompare(right));
+}
+
+function booleanOrNull(seen: boolean, value: boolean): boolean | null {
+  return seen ? value : null;
 }
 
 function packageFamilyKey(row: { device_id: string; profile: string; ecosystem: string; normalized_name: string }): string {

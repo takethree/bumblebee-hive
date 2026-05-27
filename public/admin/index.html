@@ -256,6 +256,49 @@
           </table>
         </div>
         <nav id="packages-pagination" class="pagination" aria-label="Inventory pages"></nav>
+        <div id="package-detail" class="package-detail" hidden>
+          <div class="package-detail-header">
+            <div>
+              <h3 id="package-detail-title">Package</h3>
+              <p id="package-detail-note">metadata only</p>
+            </div>
+            <button id="clear-package" type="button">Clear</button>
+          </div>
+          <div id="package-detail-summary" class="detail-grid"></div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Version</th>
+                  <th>Devices</th>
+                  <th>Occurrences</th>
+                  <th>Sources</th>
+                  <th>Observed</th>
+                </tr>
+              </thead>
+              <tbody id="package-detail-versions-body">
+                <tr><td colspan="5">No versions selected.</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Device</th>
+                  <th>Profile</th>
+                  <th>Versions</th>
+                  <th>Occurrences</th>
+                  <th>Sources</th>
+                  <th>Observed</th>
+                </tr>
+              </thead>
+              <tbody id="package-detail-devices-body">
+                <tr><td colspan="6">No affected devices selected.</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
       </section>
 
       <section class="panel">

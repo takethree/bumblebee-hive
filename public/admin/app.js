@@ -10,6 +10,10 @@ const pageSizeStorageKeys = {
 
 const state = {
   selectedDeviceId: "",
+  selectedPackageName: "",
+  selectedPackageEcosystem: "",
+  selectedPackageProfile: "",
+  selectedPackageDeviceId: "",
   autoRefreshTimer: 0,
   packageView: storedPackageView(),
   devicePageSize: storedPageSize("devicePageSize"),
@@ -43,6 +47,13 @@ const el = {
   devicesPagination: document.querySelector("#devices-pagination"),
   packagesBody: document.querySelector("#packages-body"),
   packagesPagination: document.querySelector("#packages-pagination"),
+  packageDetail: document.querySelector("#package-detail"),
+  packageDetailTitle: document.querySelector("#package-detail-title"),
+  packageDetailNote: document.querySelector("#package-detail-note"),
+  packageDetailSummary: document.querySelector("#package-detail-summary"),
+  packageDetailVersionsBody: document.querySelector("#package-detail-versions-body"),
+  packageDetailDevicesBody: document.querySelector("#package-detail-devices-body"),
+  clearPackage: document.querySelector("#clear-package"),
   runsBody: document.querySelector("#runs-body"),
   runsPagination: document.querySelector("#runs-pagination"),
   detail: document.querySelector("#device-detail"),
@@ -217,6 +228,10 @@ function applyUrlStateFromLocation() {
   el.packageQuery.value = params.get("package_query") || "";
   el.packageEcosystem.value = params.get("ecosystem") || "";
   el.packageProfile.value = params.get("profile") || "";
+  state.selectedPackageName = params.get("selected_package") || "";
+  state.selectedPackageEcosystem = params.get("selected_ecosystem") || "";
+  state.selectedPackageProfile = params.get("selected_profile") || "";
+  state.selectedPackageDeviceId = params.get("selected_device") || "";
   const urlPackageView = params.get("inventory_view") || "";
   state.packageView = packageViews.has(urlPackageView) ? urlPackageView : storedPackageView();
 }
@@ -251,6 +266,10 @@ function currentAdminPath() {
   setParamIfValue(params, "package_query", el.packageQuery.value.trim());
   setParamIfValue(params, "ecosystem", el.packageEcosystem.value.trim());
   setParamIfValue(params, "profile", el.packageProfile.value.trim());
+  setParamIfValue(params, "selected_package", state.selectedPackageName);
+  setParamIfValue(params, "selected_ecosystem", state.selectedPackageEcosystem);
+  setParamIfValue(params, "selected_profile", state.selectedPackageProfile);
+  setParamIfValue(params, "selected_device", state.selectedPackageDeviceId);
   setPageSizeParam(params, "inventory_page_size", state.inventoryPageSize);
   setPageParam(params, "inventory_page", state.inventoryPage);
   setParamIfValue(params, "run_status", el.runStatus.value);
@@ -429,6 +448,10 @@ function packageObservedAt(pkg) {
   return pkg.latest_observed_at || pkg.observed_at;
 }
 
+function packageDeviceButton(deviceId) {
+  return `<button class="link-button" type="button" data-open-device="${escapeHtml(deviceId)}" title="${escapeHtml(deviceId)}">${escapeHtml(shortId(deviceId))}</button>`;
+}
+
 function packageName(pkg) {
   const name = pkg.normalized_name || pkg.package_name || "-";
   return pkg.requested_spec ? `${escapeHtml(name)}<br><small>${escapeHtml(pkg.requested_spec)}</small>` : escapeHtml(name);
@@ -476,17 +499,73 @@ async function loadPackages() {
     return;
   }
   el.packagesBody.innerHTML = data.packages.map((pkg) => `
-    <tr data-device-id="${escapeHtml(pkg.device_id)}">
+    <tr data-package-name="${escapeHtml(pkg.normalized_name || pkg.package_name || "")}" data-package-ecosystem="${escapeHtml(pkg.ecosystem || "")}" data-package-profile="${escapeHtml(pkg.profile || "")}" data-device-id="${escapeHtml(pkg.device_id || "")}">
       <td>${packageName(pkg)}</td>
       <td>${escapeHtml(pkg.ecosystem || "-")}</td>
       <td>${packageVersionCell(pkg)}</td>
-      <td title="${escapeHtml(pkg.device_id)}">${escapeHtml(shortId(pkg.device_id))}</td>
+      <td>${packageDeviceButton(pkg.device_id)}</td>
       <td>${escapeHtml(pkg.profile || "-")}</td>
       <td>${packageOccurrenceCount(pkg)}</td>
       <td>${escapeHtml(packageSourceLabel(pkg))}</td>
       <td>${escapeHtml(formatTime(packageObservedAt(pkg)))}</td>
     </tr>
   `).join("");
+}
+
+async function loadPackageDetail() {
+  if (!state.selectedPackageName || !state.selectedPackageEcosystem) {
+    el.packageDetail.hidden = true;
+    return;
+  }
+  const params = new URLSearchParams({
+    name: state.selectedPackageName,
+    ecosystem: state.selectedPackageEcosystem
+  });
+  if (state.selectedPackageProfile) params.set("profile", state.selectedPackageProfile);
+  if (state.selectedPackageDeviceId) params.set("device_id", state.selectedPackageDeviceId);
+  const data = await getJSON(`/v1/ui/admin/packages/detail?${params.toString()}`);
+  renderPackageDetail(data);
+}
+
+function renderPackageDetail(data) {
+  const pkg = data.package || {};
+  el.packageDetail.hidden = false;
+  el.packageDetailTitle.textContent = `${pkg.normalized_name || state.selectedPackageName} (${pkg.ecosystem || state.selectedPackageEcosystem})`;
+  el.packageDetailNote.textContent = [
+    `${formatNumber(pkg.version_count)} versions`,
+    `${formatNumber(pkg.device_count)} devices`,
+    `${formatNumber(pkg.total_occurrence_count)} occurrences`,
+    data.truncated ? "truncated" : ""
+  ].filter(Boolean).join(" / ");
+  el.packageDetailSummary.innerHTML = [
+    ["Profiles", listLabel(pkg.profiles) || "-"],
+    ["Sources", packageSourceLabel(pkg)],
+    ["Direct dependency", pkg.direct_dependency_present === null || pkg.direct_dependency_present === undefined ? "-" : String(pkg.direct_dependency_present)],
+    ["Lifecycle scripts", String(!!pkg.has_lifecycle_scripts)]
+  ].map(([label, value]) => `<div><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`).join("");
+  el.packageDetailVersionsBody.innerHTML = (data.versions || []).length === 0
+    ? '<tr><td colspan="5">No versions found.</td></tr>'
+    : data.versions.map((version) => `
+      <tr>
+        <td>${escapeHtml(version.version || "-")}</td>
+        <td>${formatNumber(version.device_count)}</td>
+        <td>${formatNumber(version.occurrence_count)}</td>
+        <td>${escapeHtml(packageSourceLabel(version))}</td>
+        <td>${escapeHtml(formatTime(packageObservedAt(version)))}</td>
+      </tr>
+    `).join("");
+  el.packageDetailDevicesBody.innerHTML = (data.devices || []).length === 0
+    ? '<tr><td colspan="6">No affected devices found.</td></tr>'
+    : data.devices.map((device) => `
+      <tr>
+        <td>${packageDeviceButton(device.device_id)}</td>
+        <td>${escapeHtml(device.profile || "-")}</td>
+        <td>${escapeHtml(listLabel(device.versions) || "-")}</td>
+        <td>${formatNumber(device.total_occurrence_count)}</td>
+        <td>${escapeHtml(packageSourceLabel(device))}</td>
+        <td>${escapeHtml(formatTime(packageObservedAt(device)))}</td>
+      </tr>
+    `).join("");
 }
 
 async function loadDeviceDetail(deviceId) {
@@ -575,6 +654,11 @@ async function restoreFromLocation() {
     if (state.selectedDeviceId) {
       await loadDeviceDetail(state.selectedDeviceId);
     }
+    if (state.selectedPackageName && state.selectedPackageEcosystem) {
+      await loadPackageDetail();
+    } else {
+      el.packageDetail.hidden = true;
+    }
   } catch (error) {
     showError(error);
   }
@@ -586,6 +670,24 @@ async function selectDevice(deviceId) {
   state.devicePage = pageFromParams(new URL(window.location.href).searchParams, "device_page");
   syncUrlState("push");
   await loadDeviceDetail(deviceId);
+}
+
+async function selectPackage(pkg) {
+  state.selectedPackageName = pkg.normalized_name || pkg.package_name || "";
+  state.selectedPackageEcosystem = pkg.ecosystem || "";
+  state.selectedPackageProfile = pkg.profile || "";
+  state.selectedPackageDeviceId = state.selectedDeviceId ? pkg.device_id || state.selectedDeviceId : "";
+  syncUrlState("push");
+  await loadPackageDetail();
+}
+
+function clearPackageSelection(mode = "push") {
+  state.selectedPackageName = "";
+  state.selectedPackageEcosystem = "";
+  state.selectedPackageProfile = "";
+  state.selectedPackageDeviceId = "";
+  el.packageDetail.hidden = true;
+  syncUrlState(mode);
 }
 
 el.refresh.addEventListener("click", refreshAll);
@@ -609,16 +711,19 @@ el.runProfile.addEventListener("change", () => {
 el.inventoryPageSize.addEventListener("change", () => setPageSize("inventoryPageSize", "inventoryPage", el.inventoryPageSize, loadPackages));
 el.packageQuery.addEventListener("input", () => {
   state.inventoryPage = 1;
+  clearPackageSelection("replace");
   syncUrlState("replace");
   loadPackages();
 });
 el.packageEcosystem.addEventListener("change", () => {
   state.inventoryPage = 1;
+  clearPackageSelection("replace");
   syncUrlState("replace");
   loadPackages();
 });
 el.packageProfile.addEventListener("change", () => {
   state.inventoryPage = 1;
+  clearPackageSelection("replace");
   syncUrlState("replace");
   loadPackages();
 });
@@ -633,6 +738,7 @@ el.packageView.forEach((input) => {
     }
     state.inventoryPage = 1;
     state.detailInventoryPage = 1;
+    clearPackageSelection("replace");
     syncUrlState("replace");
     if (state.selectedDeviceId && !el.detail.hidden) {
       loadDeviceDetail(state.selectedDeviceId);
@@ -649,6 +755,7 @@ el.clearDevice.addEventListener("click", () => {
     loadPackages();
     loadRuns();
 });
+el.clearPackage.addEventListener("click", () => clearPackageSelection("push"));
 el.detailInventoryPageSize.addEventListener("change", () => setPageSize("detailInventoryPageSize", "detailInventoryPage", el.detailInventoryPageSize, () => loadDevicePackages()));
 el.disableDevice.addEventListener("click", () => lifecycleAction("disable"));
 el.enableDevice.addEventListener("click", () => lifecycleAction("enable"));
@@ -662,8 +769,23 @@ el.healthBody.addEventListener("click", (event) => {
 });
 el.packagesBody.addEventListener("click", (event) => {
   if (event.target.closest("details, summary, button, input, select, a")) return;
-  const row = event.target.closest("tr[data-device-id]");
-  if (row) selectDevice(row.dataset.deviceId);
+  const row = event.target.closest("tr[data-package-name]");
+  if (row) {
+    selectPackage({
+      normalized_name: row.dataset.packageName,
+      ecosystem: row.dataset.packageEcosystem,
+      profile: row.dataset.packageProfile,
+      device_id: row.dataset.deviceId
+    });
+  }
+});
+el.packagesBody.addEventListener("click", (event) => {
+  const button = event.target.closest("button[data-open-device]");
+  if (button) selectDevice(button.dataset.openDevice);
+});
+el.packageDetail.addEventListener("click", (event) => {
+  const button = event.target.closest("button[data-open-device]");
+  if (button) selectDevice(button.dataset.openDevice);
 });
 el.devicesPagination.addEventListener("click", (event) => {
   const button = event.target.closest("button[data-page]");
@@ -695,7 +817,9 @@ if (globalThis.__hiveAdminTesting) {
     currentAdminPath,
     deviceIdFromPath,
     restoreFromLocation,
+    selectPackage,
     selectDevice,
+    clearPackageSelection,
     setPage,
     setPageSize,
     state,

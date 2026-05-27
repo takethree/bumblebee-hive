@@ -265,6 +265,48 @@ button.danger:hover {
   color: var(--brand-dark);
 }
 
+#clear-package,
+.link-button {
+  background: #fff;
+  color: var(--brand-dark);
+}
+
+.link-button {
+  border-color: transparent;
+  min-height: 0;
+  padding: 0;
+  text-align: left;
+}
+
+.link-button:hover {
+  background: transparent;
+  color: var(--brand);
+  text-decoration: underline;
+}
+
+.package-detail {
+  border-top: 1px solid var(--line);
+}
+
+.package-detail-header {
+  align-items: center;
+  display: flex;
+  gap: 16px;
+  justify-content: space-between;
+  padding: 14px 16px;
+}
+
+.package-detail h3 {
+  font-size: 15px;
+  margin: 0;
+}
+
+.package-detail p {
+  color: var(--muted);
+  font-size: 13px;
+  margin-top: 3px;
+}
+
 .table-wrap {
   overflow-x: auto;
 }
@@ -298,7 +340,15 @@ tr[data-device-id] {
   cursor: pointer;
 }
 
+tr[data-package-name] {
+  cursor: pointer;
+}
+
 tr[data-device-id]:hover {
+  background: #eef8fa;
+}
+
+tr[data-package-name]:hover {
   background: #eef8fa;
 }
 

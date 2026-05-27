@@ -43,15 +43,18 @@ Cloudflare Access for browser authentication and calls same-origin
 `X-Hive-Admin-Token`; that token remains limited to script/operator API calls
 against `/v1/admin/*`.
 
-Device detail views are recoverable at `/admin/devices/<device-id>`. The UI
-also preserves key filters in query parameters such as `device_status`,
-`inventory_view`, `package_query`, `ecosystem`, `profile`, `run_status`, and
-`run_profile`. Numbered table pages are recoverable through `device_page`,
-`inventory_page`, `run_page`, and `detail_inventory_page`. The UI defaults to
-10 rows per page and lets operators choose 10, 25, 50, or 100 rows next to each
-paginated list. Non-default choices are recoverable through `device_page_size`,
-`inventory_page_size`, `run_page_size`, and `detail_inventory_page_size`.
-Auto-refresh remains local browser state and is not encoded in the URL.
+Device detail views are recoverable at `/admin/devices/<device-id>`. Package
+drill-down state is recoverable in the same admin route with query parameters
+such as `selected_package`, `selected_ecosystem`, `selected_profile`, and
+`selected_device`. The UI also preserves key filters in query parameters such
+as `device_status`, `inventory_view`, `package_query`, `ecosystem`, `profile`,
+`run_status`, and `run_profile`. Numbered table pages are recoverable through
+`device_page`, `inventory_page`, `run_page`, and `detail_inventory_page`. The
+UI defaults to 10 rows per page and lets operators choose 10, 25, 50, or 100
+rows next to each paginated list. Non-default choices are recoverable through
+`device_page_size`, `inventory_page_size`, `run_page_size`, and
+`detail_inventory_page_size`. Auto-refresh remains local browser state and is
+not encoded in the URL.
 
 Configure these Worker values before using the UI:
 
@@ -276,6 +279,7 @@ Supported endpoints:
 - `GET /v1/admin/devices/<device-id>`
 - `GET /v1/admin/runs?device_id=<device-id>&status=complete&profile=baseline&limit=50&offset=0`
 - `GET /v1/admin/packages?query=<name>&ecosystem=npm&profile=baseline&view=package|summary|observations&limit=50&offset=0`
+- `GET /v1/admin/packages/detail?name=<normalized-name>&ecosystem=npm&profile=baseline&device_id=<device-id>`
 - `GET /v1/admin/devices/<device-id>/packages?profile=baseline&view=package|summary|observations&limit=50&offset=0`
 
 List endpoints return additive pagination metadata alongside existing arrays:
@@ -399,6 +403,11 @@ categories such as package managers, source types, and root kinds.
 `versions[]` details for each version. Use `view=observations` when
 troubleshooting needs the current row-level package observations behind a
 summary.
+
+Package drill-down uses exact `name` plus `ecosystem` matching against current
+normalized package state. The detail response includes package summary,
+version summary, affected-device summary, occurrence counts, source categories,
+and latest observed metadata. It is intentionally not a raw observation browser.
 
 The admin UI explicitly defaults to the package-family view and stores the
 operator's selected grouping mode in browser local storage. The API default

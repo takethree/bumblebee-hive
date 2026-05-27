@@ -207,6 +207,10 @@ class MemoryStmt {
         const profile = String(this.values[valueIndex++]);
         rows = rows.filter((row) => row.profile === profile);
       }
+      if (this.sql.includes("normalized_name = ?")) {
+        const name = String(this.values[valueIndex++]);
+        rows = rows.filter((row) => row.normalized_name === name);
+      }
       if (this.sql.includes("normalized_name LIKE ?")) {
         const query = String(this.values[valueIndex++]).replace(/^%|%$/g, "").toLowerCase();
         valueIndex++;
@@ -381,6 +385,10 @@ class MemoryStmt {
     if (this.sql.includes("profile = ?")) {
       const profile = String(this.values[valueIndex++]);
       rows = rows.filter((row) => row.profile === profile);
+    }
+    if (this.sql.includes("normalized_name = ?")) {
+      const name = String(this.values[valueIndex++]);
+      rows = rows.filter((row) => row.normalized_name === name);
     }
     if (this.sql.includes("normalized_name LIKE ?")) {
       const query = String(this.values[valueIndex++]).replace(/^%|%$/g, "").toLowerCase();
@@ -1232,6 +1240,82 @@ describe("bumblebee hive worker", () => {
     expect(forbiddenVisibilityFields(familyBody)).toEqual([]);
   });
 
+  it("returns exact metadata-only package drill-down detail", async () => {
+    const env = makeEnv();
+    const hmacKey = "device-secret";
+    await addDevice(env, "device-1", hmacKey);
+    await addDevice(env, "device-2", hmacKey);
+    const moduleRecord = {
+      ...packageRecord("run-1", "device-1", "left-pad", "1.0.0"),
+      record_id: "package:baseline:left-pad:1.0.0:node_modules",
+      root_kind: "user_package_root",
+      source_type: "node_modules",
+      direct_dependency: false,
+      has_lifecycle_scripts: true
+    };
+    const deviceOneNDJSON = [
+      JSON.stringify(packageRecord("run-1", "device-1", "left-pad", "1.0.0")),
+      JSON.stringify(moduleRecord),
+      JSON.stringify(packageRecord("run-1", "device-1", "left-pad", "2.0.0")),
+      JSON.stringify(packageRecord("run-1", "device-1", "left-pad-extra", "9.0.0")),
+      JSON.stringify(summaryRecord("run-1", "device-1"))
+    ].join("\n") + "\n";
+    const deviceTwoNDJSON = [
+      JSON.stringify(packageRecord("run-2", "device-2", "left-pad", "1.0.0")),
+      JSON.stringify(summaryRecord("run-2", "device-2"))
+    ].join("\n") + "\n";
+
+    await worker.fetch(await signedRequest(env, gzipSync(deviceOneNDJSON), hmacKey, {
+      "X-Inventory-Device-Id": "device-1"
+    }), env);
+    await worker.fetch(await signedRequest(env, gzipSync(deviceTwoNDJSON), hmacKey, {
+      "X-Inventory-Device-Id": "device-2"
+    }), env);
+    await testInternals.normalizeQueuedBatch(env, env.NORMALIZE_QUEUE.messages[0] as { device_id: string; run_id: string; batch_id: string });
+    await testInternals.normalizeQueuedBatch(env, env.NORMALIZE_QUEUE.messages[1] as { device_id: string; run_id: string; batch_id: string });
+
+    const response = await worker.fetch(new Request("https://hive.example.test/v1/admin/packages/detail?name=left-pad&ecosystem=npm", {
+      headers: adminHeaders(env)
+    }), env);
+    const body = await response.json() as {
+      package: { normalized_name: string; version_count: number; device_count: number; total_occurrence_count: number; source_types: string[]; has_lifecycle_scripts: boolean };
+      versions: Array<{ version: string; device_count: number; occurrence_count: number }>;
+      devices: Array<{ device_id: string; versions: string[]; total_occurrence_count: number }>;
+      record_id?: string;
+      source_file?: string;
+    };
+
+    expect(response.status).toBe(200);
+    expect(body.package).toEqual(expect.objectContaining({
+      normalized_name: "left-pad",
+      version_count: 2,
+      device_count: 2,
+      total_occurrence_count: 4,
+      source_types: ["node_modules", "package-lock"],
+      has_lifecycle_scripts: true
+    }));
+    expect(body.versions).toEqual([
+      expect.objectContaining({ version: "1.0.0", device_count: 2, occurrence_count: 3 }),
+      expect.objectContaining({ version: "2.0.0", device_count: 1, occurrence_count: 1 })
+    ]);
+    expect(body.devices.find((device) => device.device_id === "device-1")).toEqual(expect.objectContaining({
+      versions: ["1.0.0", "2.0.0"],
+      total_occurrence_count: 3
+    }));
+    expect(body.devices.find((device) => device.device_id === "device-2")).toEqual(expect.objectContaining({
+      versions: ["1.0.0"],
+      total_occurrence_count: 1
+    }));
+    expect(body.record_id).toBeUndefined();
+    expect(body.source_file).toBeUndefined();
+    expect(forbiddenVisibilityFields(body)).toEqual([]);
+
+    const fuzzyMiss = await worker.fetch(new Request("https://hive.example.test/v1/admin/packages/detail?name=left&ecosystem=npm", {
+      headers: adminHeaders(env)
+    }), env);
+    expect(fuzzyMiss.status).toBe(404);
+  });
+
   it("returns exact pagination metadata for package views and device-scoped packages", async () => {
     const env = makeEnv();
     const hmacKey = "device-secret";
@@ -1339,15 +1423,22 @@ describe("bumblebee hive worker", () => {
     const detailResponse = await worker.fetch(new Request("https://hive.example.test/v1/ui/admin/devices/device-1/packages?view=package", {
       headers: { "Cf-Access-Jwt-Assertion": token }
     }), env);
+    const packageDetailResponse = await worker.fetch(new Request("https://hive.example.test/v1/ui/admin/packages/detail?name=left-pad&ecosystem=npm", {
+      headers: { "Cf-Access-Jwt-Assertion": token }
+    }), env);
 
     const packagesBody = await packagesResponse.json() as { view: string };
     const detailBody = await detailResponse.json() as { view: string };
+    const packageDetailBody = await packageDetailResponse.json() as { package: { normalized_name: string } };
     expect(packagesResponse.status).toBe(200);
     expect(detailResponse.status).toBe(200);
+    expect(packageDetailResponse.status).toBe(200);
     expect(packagesBody.view).toBe("package");
     expect(detailBody.view).toBe("package");
+    expect(packageDetailBody.package.normalized_name).toBe("left-pad");
     expect(forbiddenVisibilityFields(packagesBody)).toEqual([]);
     expect(forbiddenVisibilityFields(detailBody)).toEqual([]);
+    expect(forbiddenVisibilityFields(packageDetailBody)).toEqual([]);
   });
 
   it("accepts partial batches before the final scan summary", async () => {

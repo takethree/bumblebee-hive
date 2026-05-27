@@ -103,6 +103,28 @@ function makeHarness(initialURL: string): {
           if (pathname.includes("/runs")) {
             return { runs: [], ...pageMeta };
           }
+          if (pathname.includes("/packages/detail")) {
+            return {
+              package: {
+                normalized_name: requestURL.searchParams.get("name"),
+                ecosystem: requestURL.searchParams.get("ecosystem"),
+                profiles: ["baseline"],
+                version_count: 1,
+                device_count: 1,
+                total_occurrence_count: 1,
+                package_managers: ["npm"],
+                source_types: ["package-lock"],
+                root_kinds: ["project_root"],
+                direct_dependency_present: true,
+                has_lifecycle_scripts: false,
+                latest_observed_at: null
+              },
+              versions: [],
+              devices: [],
+              observation_count: 1,
+              truncated: false
+            };
+          }
           if (pathname.includes("/packages")) {
             return { packages: [], ...pageMeta };
           }
@@ -159,7 +181,7 @@ async function loadAdminApp(harness: ReturnType<typeof makeHarness>): Promise<Re
 
 describe("admin URL state", () => {
   it("hydrates device and filters from path plus query parameters", async () => {
-    const harness = makeHarness("https://hive.example.test/admin/devices/device-1?device_status=all&inventory_view=summary&package_query=left&ecosystem=npm&profile=baseline&run_status=complete&run_profile=project");
+    const harness = makeHarness("https://hive.example.test/admin/devices/device-1?device_status=all&inventory_view=summary&package_query=left&ecosystem=npm&profile=baseline&selected_package=left-pad&selected_ecosystem=npm&selected_profile=baseline&selected_device=device-1&run_status=complete&run_profile=project");
     const admin = await loadAdminApp(harness);
 
     expect(harness.elements.get("device-status")?.value).toBe("all");
@@ -169,7 +191,7 @@ describe("admin URL state", () => {
     expect(harness.elements.get("run-status")?.value).toBe("complete");
     expect(harness.elements.get("run-profile")?.value).toBe("project");
     expect(harness.packageViewInputs.find((input) => input.value === "summary")?.checked).toBe(true);
-    expect(admin.currentAdminPath()).toBe("/admin/devices/device-1?device_status=all&inventory_view=summary&package_query=left&ecosystem=npm&profile=baseline&run_status=complete&run_profile=project");
+    expect(admin.currentAdminPath()).toBe("/admin/devices/device-1?device_status=all&inventory_view=summary&package_query=left&ecosystem=npm&profile=baseline&selected_package=left-pad&selected_ecosystem=npm&selected_profile=baseline&selected_device=device-1&run_status=complete&run_profile=project");
   });
 
   it("pushes device paths, clears to dashboard, and restores Back/Forward state", async () => {
@@ -235,5 +257,24 @@ describe("admin URL state", () => {
     expect((admin as unknown as { state: { inventoryPageSize: number; inventoryPage: number; runPage: number } }).state.inventoryPageSize).toBe(50);
     expect((admin as unknown as { state: { inventoryPageSize: number; inventoryPage: number; runPage: number } }).state.inventoryPage).toBe(1);
     expect((admin as unknown as { state: { inventoryPageSize: number; inventoryPage: number; runPage: number } }).state.runPage).toBe(5);
+  });
+
+  it("pushes and clears selected package detail state", async () => {
+    const harness = makeHarness("https://hive.example.test/admin/?inventory_view=package");
+    const admin = await loadAdminApp(harness);
+
+    await admin.selectPackage({
+      normalized_name: "left-pad",
+      ecosystem: "npm",
+      profile: "baseline",
+      device_id: "device:2"
+    });
+
+    expect(harness.pushes.at(-1)).toBe("/admin/?inventory_view=package&selected_package=left-pad&selected_ecosystem=npm&selected_profile=baseline");
+    expect(harness.elements.get("package-detail")?.hidden).toBe(false);
+
+    admin.clearPackageSelection("push");
+    expect(harness.pushes.at(-1)).toBe("/admin/?inventory_view=package");
+    expect(harness.elements.get("package-detail")?.hidden).toBe(true);
   });
 });
