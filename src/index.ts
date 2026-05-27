@@ -26,10 +26,32 @@ export interface Env {
 
 interface InventoryRecord {
   record_type?: string;
+  record_id?: string;
+  schema_version?: string;
   run_id?: string;
   profile?: string;
+  scanner_name?: string;
   scanner_version?: string;
+  scan_time?: string;
   status?: string;
+  ecosystem?: string;
+  package_name?: string;
+  normalized_name?: string;
+  version?: string;
+  root_kind?: string;
+  install_scope?: string;
+  package_manager?: string;
+  source_type?: string;
+  direct_dependency?: boolean;
+  has_lifecycle_scripts?: boolean;
+  confidence?: string;
+  requested_spec?: string;
+  server_name?: string;
+  finding_type?: string;
+  severity?: string;
+  catalog_id?: string;
+  catalog_name?: string;
+  evidence?: string;
   endpoint?: {
     device_id?: string;
   };
@@ -113,6 +135,96 @@ interface RetentionRunRow {
   device_id: string;
   profile: string;
   run_id: string;
+}
+
+interface NormalizeQueueMessage {
+  device_id?: string;
+  run_id?: string;
+  batch_id?: string;
+}
+
+interface NormalizationBatchRow {
+  batch_id: string;
+  device_id: string;
+  run_id: string;
+  received_at: string;
+  content_encoding: string | null;
+  object_key: string;
+  summary_status: string | null;
+}
+
+interface NormalizationRunRow {
+  profile: string;
+  status: string;
+  scanner_version: string | null;
+  received_at: string;
+}
+
+interface NormalizedPackageRow {
+  device_id: string;
+  profile: string;
+  record_id: string;
+  run_id: string;
+  schema_version: string | null;
+  scanner_version: string | null;
+  scan_time: string | null;
+  ecosystem: string;
+  package_name: string;
+  normalized_name: string;
+  version: string | null;
+  root_kind: string | null;
+  install_scope: string | null;
+  package_manager: string | null;
+  source_type: string | null;
+  direct_dependency: number | null;
+  has_lifecycle_scripts: number;
+  confidence: string | null;
+  requested_spec: string | null;
+  server_name: string | null;
+  observed_at: string;
+}
+
+interface NormalizedPackageSummaryRow {
+  device_id: string;
+  profile: string;
+  ecosystem: string;
+  package_name: string;
+  normalized_name: string;
+  version: string | null;
+  occurrence_count: number;
+  package_managers: string | null;
+  source_types: string | null;
+  root_kinds: string | null;
+  direct_dependency_present: number | null;
+  has_lifecycle_scripts: number | null;
+  latest_observed_at: string;
+  latest_run_id: string | null;
+}
+
+interface NormalizedPackageFamilyRow {
+  device_id: string;
+  profile: string;
+  ecosystem: string;
+  package_name: string;
+  normalized_name: string;
+  version_count: number;
+  total_occurrence_count: number;
+  package_managers: string | null;
+  source_types: string | null;
+  root_kinds: string | null;
+  direct_dependency_present: number | null;
+  has_lifecycle_scripts: number | null;
+  latest_observed_at: string;
+  latest_run_id: string | null;
+}
+
+type PackageView = "package" | "summary" | "observations";
+
+interface NormalizationResult {
+  recordsSeen: number;
+  packagesSeen: number;
+  findingsSeen: number;
+  promotedCurrent: boolean;
 }
 
 interface ValidatedRecords {
@@ -212,6 +324,20 @@ export default {
       if (request.method === "GET" && url.pathname === "/v1/ui/admin/runs") {
         return await uiAdminRuns(request, env, url);
       }
+      if (request.method === "GET" && url.pathname === "/v1/admin/packages") {
+        return await adminPackages(request, env, url);
+      }
+      if (request.method === "GET" && url.pathname === "/v1/ui/admin/packages") {
+        return await uiAdminPackages(request, env, url);
+      }
+      const devicePackagesMatch = url.pathname.match(/^\/v1\/admin\/devices\/([^/]+)\/packages$/);
+      if (request.method === "GET" && devicePackagesMatch) {
+        return await adminDevicePackages(request, env, devicePackagesMatch[1], url);
+      }
+      const uiDevicePackagesMatch = url.pathname.match(/^\/v1\/ui\/admin\/devices\/([^/]+)\/packages$/);
+      if (request.method === "GET" && uiDevicePackagesMatch) {
+        return await uiAdminDevicePackages(request, env, uiDevicePackagesMatch[1], url);
+      }
       return json({ error: "not_found" }, 404);
     } catch (error) {
       const message = error instanceof HttpError ? error.message : "internal_error";
@@ -222,6 +348,12 @@ export default {
 
   async scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
     ctx.waitUntil(runRetention(env, { dryRun: false }));
+  },
+
+  async queue(batch: MessageBatch<NormalizeQueueMessage>, env: Env): Promise<void> {
+    for (const message of batch.messages) {
+      await normalizeQueuedBatch(env, message.body);
+    }
   }
 };
 
@@ -229,7 +361,16 @@ async function serveAdminAsset(request: Request, env: Env, url: URL): Promise<Re
   if (!env.ASSETS) {
     throw new HttpError(404, "admin_ui_not_configured");
   }
+  if (isAdminShellRoute(url.pathname)) {
+    const shellURL = new URL(url);
+    shellURL.pathname = "/admin/";
+    return env.ASSETS.fetch(new Request(shellURL, request));
+  }
   return env.ASSETS.fetch(new Request(url, request));
+}
+
+function isAdminShellRoute(pathname: string): boolean {
+  return pathname === "/admin/" || /^\/admin\/devices\/[^/]+\/?$/.test(pathname);
 }
 
 async function enroll(request: Request, env: Env): Promise<Response> {
@@ -319,6 +460,201 @@ async function ingest(request: Request, env: Env): Promise<Response> {
   }
 
   return json({ ok: true, batch_id: batchID, run_id: runID, records: records.length, run_complete: summary !== null });
+}
+
+async function normalizeQueuedBatch(env: Env, message: NormalizeQueueMessage): Promise<NormalizationResult> {
+  const batchID = sanitizeOpaqueID(message.batch_id || "");
+  if (!batchID) {
+    throw new HttpError(400, "invalid_normalization_message");
+  }
+  const batch = await env.DB.prepare(
+    "SELECT batch_id, device_id, run_id, received_at, content_encoding, object_key, summary_status FROM batches WHERE batch_id = ?"
+  ).bind(batchID).first<NormalizationBatchRow>();
+  if (!batch) {
+    throw new HttpError(404, "normalization_batch_not_found");
+  }
+  if (message.device_id && sanitizeDeviceID(message.device_id) !== batch.device_id) {
+    throw new HttpError(400, "normalization_device_mismatch");
+  }
+  if (message.run_id && message.run_id !== batch.run_id) {
+    throw new HttpError(400, "normalization_run_mismatch");
+  }
+
+  const startedAt = new Date().toISOString();
+  await env.DB.prepare(
+    "INSERT OR REPLACE INTO normalization_jobs (batch_id, device_id, run_id, status, records_seen, packages_seen, findings_seen, promoted_current, error, started_at, completed_at) VALUES (?, ?, ?, 'processing', 0, 0, 0, 0, NULL, ?, NULL)"
+  ).bind(batch.batch_id, batch.device_id, batch.run_id, startedAt).run();
+
+  try {
+    const object = await env.RAW_BATCHES.get(batch.object_key);
+    if (!object) {
+      throw new HttpError(404, "raw_batch_not_found");
+    }
+    const rawBody = new Uint8Array(await object.arrayBuffer());
+    const encoding = (batch.content_encoding || "").toLowerCase();
+    const ndjson = encoding === "gzip"
+      ? await gunzipToText(rawBody)
+      : new TextDecoder().decode(rawBody);
+    if (encoding && encoding !== "gzip") {
+      throw new HttpError(415, "unsupported_content_encoding");
+    }
+
+    const records = parseNDJSON(ndjson);
+    const { runID, summary } = validateRecords(records, batch.device_id);
+    if (runID !== batch.run_id) {
+      throw new HttpError(400, "normalization_run_mismatch");
+    }
+
+    const packageRecords = records.filter((record) => record.record_type === "package");
+    const findingRecords = records.filter((record) => record.record_type === "finding");
+    await storeNormalizedRecords(env, batch, packageRecords, findingRecords);
+
+    const promotableSummary = summary && summary.status === "complete" ? summary : await completeRunSummary(env, batch);
+    const promotedCurrent = !!promotableSummary && await promoteCurrentIfEligible(env, batch, promotableSummary);
+    const completedAt = new Date().toISOString();
+    await env.DB.prepare(
+      "INSERT OR REPLACE INTO normalization_jobs (batch_id, device_id, run_id, status, records_seen, packages_seen, findings_seen, promoted_current, error, started_at, completed_at) VALUES (?, ?, ?, 'complete', ?, ?, ?, ?, NULL, ?, ?)"
+    ).bind(
+      batch.batch_id,
+      batch.device_id,
+      batch.run_id,
+      records.length,
+      packageRecords.length,
+      findingRecords.length,
+      promotedCurrent ? 1 : 0,
+      startedAt,
+      completedAt
+    ).run();
+    return {
+      recordsSeen: records.length,
+      packagesSeen: packageRecords.length,
+      findingsSeen: findingRecords.length,
+      promotedCurrent
+    };
+  } catch (error) {
+    const completedAt = new Date().toISOString();
+    const messageText = error instanceof Error ? error.message : "normalization_error";
+    await env.DB.prepare(
+      "INSERT OR REPLACE INTO normalization_jobs (batch_id, device_id, run_id, status, records_seen, packages_seen, findings_seen, promoted_current, error, started_at, completed_at) VALUES (?, ?, ?, 'error', 0, 0, 0, 0, ?, ?, ?)"
+    ).bind(batch.batch_id, batch.device_id, batch.run_id, messageText, startedAt, completedAt).run();
+    throw error;
+  }
+}
+
+async function storeNormalizedRecords(env: Env, batch: NormalizationBatchRow, packageRecords: InventoryRecord[], findingRecords: InventoryRecord[]): Promise<void> {
+  const statements: D1PreparedStatement[] = [];
+  for (const record of [...packageRecords, ...findingRecords]) {
+    const normalized = normalizedRecordValues(batch, record);
+    statements.push(env.DB.prepare(
+      `INSERT OR REPLACE INTO inventory_records (
+        device_id, run_id, record_id, record_type, profile, schema_version, scanner_version, scan_time,
+        ecosystem, package_name, normalized_name, version, root_kind, install_scope, package_manager,
+        source_type, direct_dependency, has_lifecycle_scripts, confidence, requested_spec, server_name,
+        finding_type, severity, catalog_id, catalog_name, evidence, batch_id, received_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).bind(...normalized));
+    if (record.record_type === "finding") {
+      statements.push(env.DB.prepare(
+        `INSERT OR REPLACE INTO exposure_findings (
+          device_id, run_id, record_id, profile, finding_type, severity, catalog_id, catalog_name,
+          ecosystem, package_name, normalized_name, version, root_kind, source_type, confidence,
+          evidence, batch_id, received_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).bind(
+        batch.device_id,
+        batch.run_id,
+        requiredText(record.record_id),
+        textField(record.profile),
+        requiredText(record.finding_type),
+        textOrNull(record.severity),
+        requiredText(record.catalog_id),
+        textOrNull(record.catalog_name),
+        requiredText(record.ecosystem),
+        requiredText(record.package_name),
+        requiredText(record.normalized_name),
+        textOrNull(record.version),
+        textOrNull(record.root_kind),
+        textOrNull(record.source_type),
+        textOrNull(record.confidence),
+        textOrNull(record.evidence),
+        batch.batch_id,
+        batch.received_at
+      ));
+    }
+  }
+  await runStatements(env, statements);
+}
+
+function normalizedRecordValues(batch: NormalizationBatchRow, record: InventoryRecord): unknown[] {
+  return [
+    batch.device_id,
+    batch.run_id,
+    requiredText(record.record_id),
+    requiredText(record.record_type),
+    textField(record.profile),
+    textOrNull(record.schema_version),
+    textOrNull(record.scanner_version),
+    textOrNull(record.scan_time),
+    requiredText(record.ecosystem),
+    requiredText(record.package_name),
+    requiredText(record.normalized_name),
+    textOrNull(record.version),
+    textOrNull(record.root_kind),
+    textOrNull(record.install_scope),
+    textOrNull(record.package_manager),
+    textOrNull(record.source_type),
+    boolOrNull(record.direct_dependency),
+    record.has_lifecycle_scripts ? 1 : 0,
+    textOrNull(record.confidence),
+    textOrNull(record.requested_spec),
+    textOrNull(record.server_name),
+    textOrNull(record.finding_type),
+    textOrNull(record.severity),
+    textOrNull(record.catalog_id),
+    textOrNull(record.catalog_name),
+    textOrNull(record.evidence),
+    batch.batch_id,
+    batch.received_at
+  ];
+}
+
+async function completeRunSummary(env: Env, batch: NormalizationBatchRow): Promise<InventoryRecord | null> {
+  const run = await env.DB.prepare(
+    "SELECT profile, status, scanner_version, received_at FROM runs WHERE device_id = ? AND run_id = ? AND status = 'complete' ORDER BY received_at DESC LIMIT 1"
+  ).bind(batch.device_id, batch.run_id).first<NormalizationRunRow>();
+  if (!run) {
+    return null;
+  }
+  return {
+    record_type: "scan_summary",
+    run_id: batch.run_id,
+    profile: run.profile,
+    status: run.status,
+    scanner_version: run.scanner_version || undefined,
+    scan_time: run.received_at
+  };
+}
+
+async function promoteCurrentIfEligible(env: Env, batch: NormalizationBatchRow, summary: InventoryRecord): Promise<boolean> {
+  const profile = textField(summary.profile);
+  if (summary.status !== "complete" || !["baseline", "project"].includes(profile)) {
+    return false;
+  }
+  await env.DB.prepare("DELETE FROM inventory_current WHERE device_id = ? AND profile = ?").bind(batch.device_id, profile).run();
+  await env.DB.prepare(
+    `INSERT OR REPLACE INTO inventory_current (
+      device_id, profile, record_id, run_id, schema_version, scanner_version, scan_time,
+      ecosystem, package_name, normalized_name, version, root_kind, install_scope, package_manager,
+      source_type, direct_dependency, has_lifecycle_scripts, confidence, requested_spec, server_name, observed_at
+    )
+    SELECT
+      device_id, profile, record_id, run_id, schema_version, scanner_version, scan_time,
+      ecosystem, package_name, normalized_name, version, root_kind, install_scope, package_manager,
+      source_type, direct_dependency, has_lifecycle_scripts, confidence, requested_spec, server_name, received_at
+    FROM inventory_records
+    WHERE device_id = ? AND run_id = ? AND profile = ? AND record_type = 'package'`
+  ).bind(batch.device_id, batch.run_id, profile).run();
+  return true;
 }
 
 async function disableDevice(request: Request, env: Env, rawDeviceID: string): Promise<Response> {
@@ -701,6 +1037,105 @@ async function adminRunsData(env: Env, url: URL): Promise<object> {
   };
 }
 
+async function adminPackages(request: Request, env: Env, url: URL): Promise<Response> {
+  requireAdminRequest(request, env);
+  return adminJson(await adminPackagesData(env, url, null));
+}
+
+async function uiAdminPackages(request: Request, env: Env, url: URL): Promise<Response> {
+  await requireUIAdminRequest(request, env);
+  return adminJson(await adminPackagesData(env, url, null));
+}
+
+async function adminDevicePackages(request: Request, env: Env, rawDeviceID: string, url: URL): Promise<Response> {
+  requireAdminRequest(request, env);
+  return adminJson(await adminPackagesData(env, url, rawDeviceID));
+}
+
+async function uiAdminDevicePackages(request: Request, env: Env, rawDeviceID: string, url: URL): Promise<Response> {
+  await requireUIAdminRequest(request, env);
+  return adminJson(await adminPackagesData(env, url, rawDeviceID));
+}
+
+async function adminPackagesData(env: Env, url: URL, rawDeviceID: string | null): Promise<object> {
+  const requestedView = url.searchParams.get("view") || "summary";
+  if (!isPackageView(requestedView)) {
+    throw new HttpError(400, "invalid_package_view");
+  }
+  const view = requestedView;
+  const where: string[] = [];
+  const values: (string | number)[] = [];
+  const deviceParam = rawDeviceID ? decodeURIComponent(rawDeviceID) : url.searchParams.get("device_id");
+  if (deviceParam) {
+    const deviceID = sanitizeDeviceID(deviceParam);
+    if (!deviceID) {
+      throw new HttpError(400, "invalid_device_id");
+    }
+    where.push("device_id = ?");
+    values.push(deviceID);
+  }
+  for (const param of ["ecosystem", "profile"] as const) {
+    const value = url.searchParams.get(param);
+    if (value) {
+      where.push(`${param} = ?`);
+      values.push(value);
+    }
+  }
+  const query = (url.searchParams.get("query") || "").trim();
+  if (query) {
+    where.push("(normalized_name LIKE ? OR package_name LIKE ?)");
+    const like = `%${query.replace(/[%_]/g, "\\$&")}%`;
+    values.push(like, like);
+  }
+  const limit = boundedIntParam(url.searchParams, "limit", 50, 100);
+  const offset = boundedIntParam(url.searchParams, "offset", 0, 100000);
+  const pageValues = [...values, limit, offset];
+  const whereSQL = where.length ? `WHERE ${where.join(" AND ")}` : "";
+  const packages = await packageRowsForView(env, view, whereSQL, pageValues);
+  return {
+    view,
+    packages,
+    limit,
+    offset,
+    query,
+    device_id: deviceParam ? sanitizeDeviceID(deviceParam) : null
+  };
+}
+
+function isPackageView(view: string): view is PackageView {
+  return view === "package" || view === "summary" || view === "observations";
+}
+
+async function packageRowsForView(
+  env: Env,
+  view: PackageView,
+  whereSQL: string,
+  pageValues: (string | number)[]
+): Promise<object[]> {
+  if (view === "package") {
+    const familyRows = await allRows<NormalizedPackageFamilyRow>(
+      env.DB.prepare(`${adminPackageFamilySelect()} ${whereSQL} GROUP BY device_id, profile, ecosystem, normalized_name ORDER BY normalized_name ASC, device_id ASC LIMIT ? OFFSET ?`).bind(...pageValues)
+    );
+    if (familyRows.length === 0) {
+      return [];
+    }
+    const versionRows = await allRows<NormalizedPackageSummaryRow>(
+      env.DB.prepare(adminPackageFamilyVersionSelect(whereSQL)).bind(...pageValues)
+    );
+    return formatPackageFamilyRows(familyRows, versionRows);
+  }
+  if (view === "summary") {
+    const rows = await allRows<NormalizedPackageSummaryRow>(
+      env.DB.prepare(`${adminPackageSummarySelect()} ${whereSQL} GROUP BY device_id, profile, ecosystem, normalized_name, version ORDER BY normalized_name ASC, version ASC, device_id ASC LIMIT ? OFFSET ?`).bind(...pageValues)
+    );
+    return rows.map(formatPackageSummaryRow);
+  }
+  const rows = await allRows<NormalizedPackageRow>(
+    env.DB.prepare(`${adminPackageSelect()} ${whereSQL} ORDER BY normalized_name ASC, version ASC, device_id ASC LIMIT ? OFFSET ?`).bind(...pageValues)
+  );
+  return rows.map(formatPackageRow);
+}
+
 function adminDeviceSelect(): string {
   return `SELECT
     d.device_id,
@@ -730,6 +1165,108 @@ function adminRunSelect(): string {
   FROM runs r`;
 }
 
+function adminPackageSelect(): string {
+  return `SELECT
+    device_id,
+    profile,
+    record_id,
+    run_id,
+    schema_version,
+    scanner_version,
+    scan_time,
+    ecosystem,
+    package_name,
+    normalized_name,
+    version,
+    root_kind,
+    install_scope,
+    package_manager,
+    source_type,
+    direct_dependency,
+    has_lifecycle_scripts,
+    confidence,
+    requested_spec,
+    server_name,
+    observed_at
+  FROM inventory_current`;
+}
+
+function adminPackageSummarySelect(): string {
+  return `SELECT
+    device_id,
+    profile,
+    ecosystem,
+    MIN(package_name) AS package_name,
+    normalized_name,
+    version,
+    COUNT(*) AS occurrence_count,
+    GROUP_CONCAT(DISTINCT package_manager) AS package_managers,
+    GROUP_CONCAT(DISTINCT source_type) AS source_types,
+    GROUP_CONCAT(DISTINCT root_kind) AS root_kinds,
+    MAX(CASE WHEN direct_dependency = 1 THEN 1 ELSE 0 END) AS direct_dependency_present,
+    MAX(CASE WHEN has_lifecycle_scripts = 1 THEN 1 ELSE 0 END) AS has_lifecycle_scripts,
+    MAX(observed_at) AS latest_observed_at,
+    MAX(run_id) AS latest_run_id
+  FROM inventory_current`;
+}
+
+function adminPackageFamilySelect(): string {
+  return `SELECT
+    device_id,
+    profile,
+    ecosystem,
+    MIN(package_name) AS package_name,
+    normalized_name,
+    COUNT(DISTINCT COALESCE(version, '')) AS version_count,
+    COUNT(*) AS total_occurrence_count,
+    GROUP_CONCAT(DISTINCT package_manager) AS package_managers,
+    GROUP_CONCAT(DISTINCT source_type) AS source_types,
+    GROUP_CONCAT(DISTINCT root_kind) AS root_kinds,
+    MAX(CASE WHEN direct_dependency = 1 THEN 1 ELSE 0 END) AS direct_dependency_present,
+    MAX(CASE WHEN has_lifecycle_scripts = 1 THEN 1 ELSE 0 END) AS has_lifecycle_scripts,
+    MAX(observed_at) AS latest_observed_at,
+    MAX(run_id) AS latest_run_id
+  FROM inventory_current`;
+}
+
+function adminPackageFamilyVersionSelect(whereSQL: string): string {
+  return `WITH family_page AS (
+    SELECT
+      device_id,
+      profile,
+      ecosystem,
+      normalized_name
+    FROM inventory_current
+    ${whereSQL}
+    GROUP BY device_id, profile, ecosystem, normalized_name
+    ORDER BY normalized_name ASC, device_id ASC
+    LIMIT ? OFFSET ?
+  )
+  SELECT
+    i.device_id,
+    i.profile,
+    i.ecosystem,
+    MIN(i.package_name) AS package_name,
+    i.normalized_name,
+    i.version,
+    COUNT(*) AS occurrence_count,
+    GROUP_CONCAT(DISTINCT i.package_manager) AS package_managers,
+    GROUP_CONCAT(DISTINCT i.source_type) AS source_types,
+    GROUP_CONCAT(DISTINCT i.root_kind) AS root_kinds,
+    MAX(CASE WHEN i.direct_dependency = 1 THEN 1 ELSE 0 END) AS direct_dependency_present,
+    MAX(CASE WHEN i.has_lifecycle_scripts = 1 THEN 1 ELSE 0 END) AS has_lifecycle_scripts,
+    MAX(i.observed_at) AS latest_observed_at,
+    MAX(i.run_id) AS latest_run_id
+  FROM inventory_current i
+  INNER JOIN family_page f ON
+    f.device_id = i.device_id AND
+    f.profile = i.profile AND
+    f.ecosystem = i.ecosystem AND
+    f.normalized_name = i.normalized_name
+  GROUP BY i.device_id, i.profile, i.ecosystem, i.normalized_name, i.version
+  ORDER BY i.normalized_name ASC, i.version ASC, i.device_id ASC`;
+}
+
 function formatAdminDeviceRow(row: AdminDeviceRow): object {
   return {
     device_id: row.device_id,
@@ -747,6 +1284,106 @@ function formatAdminDeviceRow(row: AdminDeviceRow): object {
       received_at: row.last_run_received_at
     } : null
   };
+}
+
+function formatPackageRow(row: NormalizedPackageRow): object {
+  return {
+    device_id: row.device_id,
+    profile: row.profile,
+    record_id: row.record_id,
+    run_id: row.run_id,
+    ecosystem: row.ecosystem,
+    package_name: row.package_name,
+    normalized_name: row.normalized_name,
+    version: row.version,
+    root_kind: row.root_kind,
+    install_scope: row.install_scope,
+    package_manager: row.package_manager,
+    source_type: row.source_type,
+    direct_dependency: row.direct_dependency === null || row.direct_dependency === undefined ? null : !!row.direct_dependency,
+    has_lifecycle_scripts: !!row.has_lifecycle_scripts,
+    confidence: row.confidence,
+    requested_spec: row.requested_spec,
+    server_name: row.server_name,
+    observed_at: row.observed_at,
+    scanner_version: row.scanner_version
+  };
+}
+
+function formatPackageSummaryRow(row: NormalizedPackageSummaryRow): object {
+  return {
+    device_id: row.device_id,
+    profile: row.profile,
+    ecosystem: row.ecosystem,
+    package_name: row.package_name,
+    normalized_name: row.normalized_name,
+    version: row.version,
+    occurrence_count: row.occurrence_count,
+    package_managers: splitGroupedValues(row.package_managers),
+    source_types: splitGroupedValues(row.source_types),
+    root_kinds: splitGroupedValues(row.root_kinds),
+    direct_dependency_present: row.direct_dependency_present === null || row.direct_dependency_present === undefined ? null : !!row.direct_dependency_present,
+    has_lifecycle_scripts: !!row.has_lifecycle_scripts,
+    latest_observed_at: row.latest_observed_at,
+    latest_run_id: row.latest_run_id,
+    observed_at: row.latest_observed_at
+  };
+}
+
+function formatPackageFamilyRows(familyRows: NormalizedPackageFamilyRow[], versionRows: NormalizedPackageSummaryRow[]): object[] {
+  const versionsByFamily = new Map<string, object[]>();
+  for (const row of versionRows) {
+    const key = packageFamilyKey(row);
+    const versions = versionsByFamily.get(key) || [];
+    versions.push(formatPackageVersionRow(row));
+    versionsByFamily.set(key, versions);
+  }
+  return familyRows.map((row) => ({
+    device_id: row.device_id,
+    profile: row.profile,
+    ecosystem: row.ecosystem,
+    package_name: row.package_name,
+    normalized_name: row.normalized_name,
+    version_count: row.version_count,
+    total_occurrence_count: row.total_occurrence_count,
+    occurrence_count: row.total_occurrence_count,
+    package_managers: splitGroupedValues(row.package_managers),
+    source_types: splitGroupedValues(row.source_types),
+    root_kinds: splitGroupedValues(row.root_kinds),
+    direct_dependency_present: row.direct_dependency_present === null || row.direct_dependency_present === undefined ? null : !!row.direct_dependency_present,
+    has_lifecycle_scripts: !!row.has_lifecycle_scripts,
+    latest_observed_at: row.latest_observed_at,
+    latest_run_id: row.latest_run_id,
+    observed_at: row.latest_observed_at,
+    versions: versionsByFamily.get(packageFamilyKey(row)) || []
+  }));
+}
+
+function formatPackageVersionRow(row: NormalizedPackageSummaryRow): object {
+  return {
+    version: row.version,
+    occurrence_count: row.occurrence_count,
+    package_managers: splitGroupedValues(row.package_managers),
+    source_types: splitGroupedValues(row.source_types),
+    root_kinds: splitGroupedValues(row.root_kinds),
+    direct_dependency_present: row.direct_dependency_present === null || row.direct_dependency_present === undefined ? null : !!row.direct_dependency_present,
+    has_lifecycle_scripts: !!row.has_lifecycle_scripts,
+    latest_observed_at: row.latest_observed_at,
+    latest_run_id: row.latest_run_id,
+    observed_at: row.latest_observed_at
+  };
+}
+
+function packageFamilyKey(row: { device_id: string; profile: string; ecosystem: string; normalized_name: string }): string {
+  return [row.device_id, row.profile, row.ecosystem, row.normalized_name].join("\u001f");
+}
+
+function splitGroupedValues(value: string | null): string[] {
+  return (value || "")
+    .split(",")
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .sort((left, right) => left.localeCompare(right));
 }
 
 function rowsWithCounts(rows: AdminRunRow[]): object[] {
@@ -895,6 +1532,22 @@ async function allRows<T>(statement: D1PreparedStatement): Promise<T[]> {
   return result.results || [];
 }
 
+async function runStatements(env: Env, statements: D1PreparedStatement[], chunkSize = 50): Promise<void> {
+  for (let index = 0; index < statements.length; index += chunkSize) {
+    const chunk = statements.slice(index, index + chunkSize);
+    if (chunk.length === 0) {
+      continue;
+    }
+    if (typeof env.DB.batch === "function") {
+      await env.DB.batch(chunk);
+    } else {
+      for (const statement of chunk) {
+        await statement.run();
+      }
+    }
+  }
+}
+
 function requireAccess(request: Request, env: Env): void {
   // Cloudflare Access consumes service-token headers at the edge and forwards
   // an application JWT to the Worker. Keep direct header support for local
@@ -997,6 +1650,27 @@ function boundedIntParam(params: URLSearchParams, name: string, fallback: number
     throw new HttpError(400, `invalid_${name}`);
   }
   return Math.min(parsed, max);
+}
+
+function textField(value: string | undefined): string {
+  return (value || "").trim();
+}
+
+function textOrNull(value: string | undefined): string | null {
+  const text = textField(value);
+  return text || null;
+}
+
+function requiredText(value: string | undefined): string {
+  const text = textField(value);
+  if (!text) {
+    throw new HttpError(400, "invalid_inventory_record");
+  }
+  return text;
+}
+
+function boolOrNull(value: boolean | undefined): number | null {
+  return value === undefined ? null : value ? 1 : 0;
 }
 
 function requireContentType(request: Request): void {
@@ -1123,6 +1797,14 @@ function sanitizeDeviceID(value: string): string {
   return trimmed;
 }
 
+function sanitizeOpaqueID(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed || trimmed.length > 256 || !/^[A-Za-z0-9._:-]+$/.test(trimmed)) {
+    return "";
+  }
+  return trimmed;
+}
+
 function normalizeAccessTeamDomain(value: string): string {
   const withoutProtocol = value.trim().replace(/^https?:\/\//, "").replace(/\/.*$/, "");
   return /^[A-Za-z0-9.-]+$/.test(withoutProtocol) ? withoutProtocol : "";
@@ -1244,5 +1926,6 @@ class HttpError extends Error {
 export const testInternals = {
   encryptSecret,
   hmacSha256Hex,
+  normalizeQueuedBatch,
   normalizeAccessTeamDomain
 };

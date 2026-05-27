@@ -140,6 +140,79 @@ label {
   min-width: 120px;
 }
 
+.segments {
+  border: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0;
+  margin: 0;
+  min-width: 260px;
+  padding: 0;
+}
+
+.segments legend {
+  color: var(--muted);
+  flex-basis: 100%;
+  font-size: 14px;
+  margin-bottom: 4px;
+}
+
+.segments label {
+  display: block;
+  min-width: 0;
+}
+
+.segments input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.segments span {
+  background: #fff;
+  border: 1px solid var(--line);
+  color: var(--brand-dark);
+  display: block;
+  font-weight: 600;
+  min-height: 36px;
+  padding: 7px 12px;
+}
+
+.segments label:first-of-type span {
+  border-radius: 6px 0 0 6px;
+}
+
+.segments label:last-of-type span {
+  border-radius: 0 6px 6px 0;
+}
+
+.segments label + label span {
+  border-left: 0;
+}
+
+.segments input:checked + span {
+  background: var(--brand);
+  border-color: var(--brand);
+  color: #fff;
+}
+
+.version-details summary {
+  color: var(--brand-dark);
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.version-line {
+  display: grid;
+  gap: 2px 8px;
+  grid-template-columns: minmax(70px, auto) auto minmax(160px, 1fr);
+  margin-top: 8px;
+}
+
+.version-line small {
+  overflow-wrap: anywhere;
+}
+
 .toggle {
   align-items: center;
   color: #e5e7eb;
@@ -207,6 +280,10 @@ th {
   font-size: 12px;
   font-weight: 700;
   text-transform: uppercase;
+}
+
+td small {
+  color: var(--muted);
 }
 
 tr[data-device-id] {

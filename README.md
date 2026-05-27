@@ -43,6 +43,12 @@ Cloudflare Access for browser authentication and calls same-origin
 `X-Hive-Admin-Token`; that token remains limited to script/operator API calls
 against `/v1/admin/*`.
 
+Device detail views are recoverable at `/admin/devices/<device-id>`. The UI
+also preserves key filters in query parameters such as `device_status`,
+`inventory_view`, `package_query`, `ecosystem`, `profile`, `run_status`, and
+`run_profile`. Auto-refresh remains local browser state and is not encoded in
+the URL.
+
 Configure these Worker values before using the UI:
 
 ```powershell
@@ -265,6 +271,8 @@ Supported endpoints:
 - `GET /v1/admin/devices?status=active|disabled|all&limit=50&offset=0`
 - `GET /v1/admin/devices/<device-id>`
 - `GET /v1/admin/runs?device_id=<device-id>&status=complete&profile=baseline&limit=50&offset=0`
+- `GET /v1/admin/packages?query=<name>&ecosystem=npm&profile=baseline&view=package|summary|observations&limit=50&offset=0`
+- `GET /v1/admin/devices/<device-id>/packages?profile=baseline&view=package|summary|observations&limit=50&offset=0`
 
 Example overview:
 
@@ -355,6 +363,37 @@ These endpoints intentionally do not expose raw inventory records, `summary_json
 R2 object keys, body hashes, HMAC key material, Access credentials, local user
 names, SIDs, hostnames, or profile paths. Use R2/D1 operator tooling separately
 for break-glass forensic access to raw batches.
+
+## Normalized Inventory
+
+Hive normalizes accepted Bumblebee `package` and `finding` records from raw R2
+batches into D1 through the `NORMALIZE_QUEUE` consumer. Raw batches remain the
+source of truth; normalized tables are the operator query surface.
+
+Current package state is promoted only after Hive sees a matching
+`scan_summary.status=complete`. `baseline` and `project` runs can promote
+current package state. `deep` runs are kept as evidence and finding data but do
+not retire or replace current inventory.
+
+Package responses default to `view=summary`, grouped by device ID, profile,
+ecosystem, normalized package name, and version. Summary rows include an
+occurrence count, latest observed time, latest run ID, and unique source
+categories such as package managers, source types, and root kinds.
+`view=package` groups by package family and includes `version_count`,
+`total_occurrence_count`, source category summaries, latest observed time, and
+`versions[]` details for each version. Use `view=observations` when
+troubleshooting needs the current row-level package observations behind a
+summary.
+
+The admin UI explicitly defaults to the package-family view and stores the
+operator's selected grouping mode in browser local storage. The API default
+stays `view=summary` for compatibility with script callers.
+
+Package responses include controlled fields such as ecosystem, package name,
+normalized name, version, source type, package manager, profile, device ID, run
+ID, confidence, and observed time. They do not expose raw payload JSON,
+`summary_json`, R2 object keys, body hashes, HMAC material, hostnames, usernames,
+SIDs, `source_file`, `project_path`, or local profile paths.
 
 ## Pilot Verification
 

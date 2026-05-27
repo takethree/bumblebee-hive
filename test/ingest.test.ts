@@ -10,6 +10,16 @@ class MemoryR2 {
     this.objects.set(key, value);
   }
 
+  async get(key: string): Promise<{ arrayBuffer: () => Promise<ArrayBuffer> } | null> {
+    const value = this.objects.get(key);
+    if (!value) {
+      return null;
+    }
+    return {
+      arrayBuffer: async () => value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength) as ArrayBuffer
+    };
+  }
+
   async delete(key: string): Promise<void> {
     this.objects.delete(key);
   }
@@ -29,6 +39,11 @@ class MemoryAssets {
     if (path === "/admin/") {
       return new Response("<!doctype html><title>Bumblebee Hive Admin</title>", {
         headers: { "Content-Type": "text/html; charset=utf-8" }
+      });
+    }
+    if (path === "/admin/app.js") {
+      return new Response("app", {
+        headers: { "Content-Type": "application/javascript; charset=utf-8" }
       });
     }
     return new Response("asset", {
@@ -90,6 +105,14 @@ class MemoryStmt {
     if (this.sql.includes("FROM devices d") && this.sql.includes("WHERE d.device_id = ?")) {
       return (this.db.adminDeviceRows().find((row) => row.device_id === String(this.values[0])) || null) as T | null;
     }
+    if (this.sql.startsWith("SELECT batch_id, device_id, run_id, received_at, content_encoding, object_key, summary_status FROM batches")) {
+      return (this.db.normalizationBatchRow(String(this.values[0])) || null) as T | null;
+    }
+    if (this.sql.startsWith("SELECT profile, status, scanner_version, received_at FROM runs")) {
+      return (this.db.runRows()
+        .filter((run) => run.device_id === String(this.values[0]) && run.run_id === String(this.values[1]) && run.status === "complete")
+        .sort((left, right) => right.received_at.localeCompare(left.received_at))[0] || null) as T | null;
+    }
     return null;
   }
 
@@ -147,6 +170,42 @@ class MemoryStmt {
       }
       return { results: this.page(rows) as T[] };
     }
+    if (this.sql.includes("FROM inventory_current")) {
+      let rows = this.db.currentRows();
+      let valueIndex = 0;
+      if (this.sql.includes("device_id = ?")) {
+        const deviceID = String(this.values[valueIndex++]);
+        rows = rows.filter((row) => row.device_id === deviceID);
+      }
+      if (this.sql.includes("ecosystem = ?")) {
+        const ecosystem = String(this.values[valueIndex++]);
+        rows = rows.filter((row) => row.ecosystem === ecosystem);
+      }
+      if (this.sql.includes("profile = ?")) {
+        const profile = String(this.values[valueIndex++]);
+        rows = rows.filter((row) => row.profile === profile);
+      }
+      if (this.sql.includes("normalized_name LIKE ?")) {
+        const query = String(this.values[valueIndex++]).replace(/^%|%$/g, "").toLowerCase();
+        valueIndex++;
+        rows = rows.filter((row) =>
+          row.normalized_name.toLowerCase().includes(query) ||
+          row.package_name.toLowerCase().includes(query)
+        );
+      }
+      if (this.sql.includes("WITH family_page")) {
+        const familyRows = this.page(this.packageFamilyRows(rows));
+        const familyKeys = new Set(familyRows.map((row) => this.packageFamilyKey(row)));
+        return { results: this.packageSummaryRows(rows).filter((row) => familyKeys.has(this.packageFamilyKey(row))) as T[] };
+      }
+      if (this.sql.includes("GROUP BY device_id, profile, ecosystem, normalized_name, version")) {
+        return { results: this.page(this.packageSummaryRows(rows)) as T[] };
+      }
+      if (this.sql.includes("GROUP BY device_id, profile, ecosystem, normalized_name")) {
+        return { results: this.page(this.packageFamilyRows(rows)) as T[] };
+      }
+      return { results: this.page(rows) as T[] };
+    }
     return { results: [] };
   }
 
@@ -180,6 +239,59 @@ class MemoryStmt {
       return { success: true, meta: { duration: 0, changes: 0 } } as D1Result;
     } else if (this.sql.startsWith("INSERT INTO device_lifecycle_events")) {
       this.db.lifecycleEvents.push(this.values);
+    } else if (this.sql.startsWith("INSERT OR REPLACE INTO normalization_jobs")) {
+      this.db.normalizationJobs.set(String(this.values[0]), this.values);
+    } else if (this.sql.startsWith("INSERT OR REPLACE INTO inventory_records")) {
+      const key = `${this.values[0]}|${this.values[1]}|${this.values[2]}`;
+      this.db.inventoryRecords.set(key, this.values);
+    } else if (this.sql.startsWith("INSERT OR REPLACE INTO exposure_findings")) {
+      const key = `${this.values[0]}|${this.values[1]}|${this.values[2]}`;
+      this.db.exposureFindings.set(key, this.values);
+    } else if (this.sql.startsWith("DELETE FROM inventory_current")) {
+      const deviceID = String(this.values[0]);
+      const profile = String(this.values[1]);
+      const before = this.db.inventoryCurrent.size;
+      for (const [key, row] of [...this.db.inventoryCurrent.entries()]) {
+        if (String(row[0]) === deviceID && String(row[1]) === profile) {
+          this.db.inventoryCurrent.delete(key);
+        }
+      }
+      return { success: true, meta: { duration: 0, changes: before - this.db.inventoryCurrent.size } } as D1Result;
+    } else if (this.sql.startsWith("INSERT OR REPLACE INTO inventory_current")) {
+      const deviceID = String(this.values[0]);
+      const runID = String(this.values[1]);
+      const profile = String(this.values[2]);
+      let changes = 0;
+      for (const record of this.db.inventoryRecordRows()) {
+        if (record.device_id === deviceID && record.run_id === runID && record.profile === profile && record.record_type === "package") {
+          const row = [
+            record.device_id,
+            record.profile,
+            record.record_id,
+            record.run_id,
+            record.schema_version,
+            record.scanner_version,
+            record.scan_time,
+            record.ecosystem,
+            record.package_name,
+            record.normalized_name,
+            record.version,
+            record.root_kind,
+            record.install_scope,
+            record.package_manager,
+            record.source_type,
+            record.direct_dependency,
+            record.has_lifecycle_scripts,
+            record.confidence,
+            record.requested_spec,
+            record.server_name,
+            record.received_at
+          ];
+          this.db.inventoryCurrent.set(`${record.device_id}|${record.profile}|${record.record_id}`, row);
+          changes++;
+        }
+      }
+      return { success: true, meta: { duration: 0, changes } } as D1Result;
     } else if (this.sql.startsWith("DELETE FROM batches")) {
       const ids = new Set(this.values.map(String));
       const before = this.db.batches.length;
@@ -216,8 +328,143 @@ class MemoryStmt {
   }
 
   private sortValue(row: unknown): string {
-    const typed = row as { last_run_received_at?: string | null; created_at?: string; received_at?: string };
-    return typed.last_run_received_at || typed.received_at || typed.created_at || "";
+    const typed = row as { last_run_received_at?: string | null; latest_observed_at?: string | null; created_at?: string; received_at?: string };
+    return typed.last_run_received_at || typed.latest_observed_at || typed.received_at || typed.created_at || "";
+  }
+
+  private packageSummaryRows(rows: ReturnType<MemoryD1["currentRows"]>): Array<Record<string, unknown>> {
+    const groups = new Map<string, {
+      device_id: string;
+      profile: string;
+      ecosystem: string;
+      package_name: string;
+      normalized_name: string;
+      version: string | null;
+      occurrence_count: number;
+      package_managers: Set<string>;
+      source_types: Set<string>;
+      root_kinds: Set<string>;
+      direct_dependency_present: number | null;
+      has_lifecycle_scripts: number;
+      latest_observed_at: string;
+      latest_run_id: string | null;
+    }>();
+    for (const row of rows) {
+      const key = JSON.stringify([row.device_id, row.profile, row.ecosystem, row.normalized_name, row.version]);
+      let group = groups.get(key);
+      if (!group) {
+        group = {
+          device_id: row.device_id,
+          profile: row.profile,
+          ecosystem: row.ecosystem,
+          package_name: row.package_name,
+          normalized_name: row.normalized_name,
+          version: row.version,
+          occurrence_count: 0,
+          package_managers: new Set<string>(),
+          source_types: new Set<string>(),
+          root_kinds: new Set<string>(),
+          direct_dependency_present: null,
+          has_lifecycle_scripts: 0,
+          latest_observed_at: row.observed_at,
+          latest_run_id: row.run_id
+        };
+        groups.set(key, group);
+      }
+      group.occurrence_count++;
+      if (row.package_manager) group.package_managers.add(row.package_manager);
+      if (row.source_type) group.source_types.add(row.source_type);
+      if (row.root_kind) group.root_kinds.add(row.root_kind);
+      if (row.direct_dependency !== null) {
+        group.direct_dependency_present = group.direct_dependency_present === 1 || row.direct_dependency === 1 ? 1 : 0;
+      }
+      if (row.has_lifecycle_scripts) group.has_lifecycle_scripts = 1;
+      if (row.observed_at >= group.latest_observed_at) {
+        group.latest_observed_at = row.observed_at;
+        group.latest_run_id = row.run_id;
+      }
+    }
+    return [...groups.values()].map((group) => ({
+      ...group,
+      package_managers: [...group.package_managers].sort().join(","),
+      source_types: [...group.source_types].sort().join(","),
+      root_kinds: [...group.root_kinds].sort().join(",")
+    }));
+  }
+
+  private packageFamilyRows(rows: ReturnType<MemoryD1["currentRows"]>): Array<Record<string, unknown>> {
+    const groups = new Map<string, {
+      device_id: string;
+      profile: string;
+      ecosystem: string;
+      package_name: string;
+      normalized_name: string;
+      versions: Set<string>;
+      total_occurrence_count: number;
+      package_managers: Set<string>;
+      source_types: Set<string>;
+      root_kinds: Set<string>;
+      direct_dependency_present: number | null;
+      has_lifecycle_scripts: number;
+      latest_observed_at: string;
+      latest_run_id: string | null;
+    }>();
+    for (const row of rows) {
+      const key = this.packageFamilyKey(row);
+      let group = groups.get(key);
+      if (!group) {
+        group = {
+          device_id: row.device_id,
+          profile: row.profile,
+          ecosystem: row.ecosystem,
+          package_name: row.package_name,
+          normalized_name: row.normalized_name,
+          versions: new Set<string>(),
+          total_occurrence_count: 0,
+          package_managers: new Set<string>(),
+          source_types: new Set<string>(),
+          root_kinds: new Set<string>(),
+          direct_dependency_present: null,
+          has_lifecycle_scripts: 0,
+          latest_observed_at: row.observed_at,
+          latest_run_id: row.run_id
+        };
+        groups.set(key, group);
+      }
+      group.versions.add(row.version || "");
+      group.total_occurrence_count++;
+      if (row.package_manager) group.package_managers.add(row.package_manager);
+      if (row.source_type) group.source_types.add(row.source_type);
+      if (row.root_kind) group.root_kinds.add(row.root_kind);
+      if (row.direct_dependency !== null) {
+        group.direct_dependency_present = group.direct_dependency_present === 1 || row.direct_dependency === 1 ? 1 : 0;
+      }
+      if (row.has_lifecycle_scripts) group.has_lifecycle_scripts = 1;
+      if (row.observed_at >= group.latest_observed_at) {
+        group.latest_observed_at = row.observed_at;
+        group.latest_run_id = row.run_id;
+      }
+    }
+    return [...groups.values()].map((group) => ({
+      device_id: group.device_id,
+      profile: group.profile,
+      ecosystem: group.ecosystem,
+      package_name: group.package_name,
+      normalized_name: group.normalized_name,
+      version_count: group.versions.size,
+      total_occurrence_count: group.total_occurrence_count,
+      package_managers: [...group.package_managers].sort().join(","),
+      source_types: [...group.source_types].sort().join(","),
+      root_kinds: [...group.root_kinds].sort().join(","),
+      direct_dependency_present: group.direct_dependency_present,
+      has_lifecycle_scripts: group.has_lifecycle_scripts,
+      latest_observed_at: group.latest_observed_at,
+      latest_run_id: group.latest_run_id
+    }));
+  }
+
+  private packageFamilyKey(row: { device_id?: unknown; profile?: unknown; ecosystem?: unknown; normalized_name?: unknown }): string {
+    return [row.device_id, row.profile, row.ecosystem, row.normalized_name].map(String).join("|");
   }
 }
 
@@ -226,6 +473,10 @@ class MemoryD1 {
   batches: unknown[][] = [];
   runs: unknown[][] = [];
   lifecycleEvents: unknown[][] = [];
+  normalizationJobs = new Map<string, unknown[]>();
+  inventoryRecords = new Map<string, unknown[]>();
+  inventoryCurrent = new Map<string, unknown[]>();
+  exposureFindings = new Map<string, unknown[]>();
 
   prepare(sql: string): MemoryStmt {
     return new MemoryStmt(this, sql);
@@ -248,6 +499,30 @@ class MemoryD1 {
       object_key: String(batch[5]),
       record_count: Number(batch[7] || 0)
     }));
+  }
+
+  normalizationBatchRow(batchID: string): {
+    batch_id: string;
+    device_id: string;
+    run_id: string;
+    received_at: string;
+    content_encoding: string | null;
+    object_key: string;
+    summary_status: string | null;
+  } | null {
+    const batch = this.batches.find((row) => String(row[0]) === batchID);
+    if (!batch) {
+      return null;
+    }
+    return {
+      batch_id: String(batch[0]),
+      device_id: String(batch[1]),
+      run_id: String(batch[2]),
+      received_at: String(batch[3]),
+      content_encoding: batch[4] === null || batch[4] === undefined ? null : String(batch[4]),
+      object_key: String(batch[5]),
+      summary_status: batch[8] === null || batch[8] === undefined ? null : String(batch[8])
+    };
   }
 
   runRows(): Array<{ device_id: string; profile: string; run_id: string; status: string; scanner_version: string | null; received_at: string }> {
@@ -316,6 +591,104 @@ class MemoryD1 {
         record_count: runBatches.reduce((total, batch) => total + batch.record_count, 0)
       };
     });
+  }
+
+  inventoryRecordRows(): Array<{
+    device_id: string;
+    run_id: string;
+    record_id: string;
+    record_type: string;
+    profile: string;
+    schema_version: string | null;
+    scanner_version: string | null;
+    scan_time: string | null;
+    ecosystem: string;
+    package_name: string;
+    normalized_name: string;
+    version: string | null;
+    root_kind: string | null;
+    install_scope: string | null;
+    package_manager: string | null;
+    source_type: string | null;
+    direct_dependency: number | null;
+    has_lifecycle_scripts: number;
+    confidence: string | null;
+    requested_spec: string | null;
+    server_name: string | null;
+    received_at: string;
+  }> {
+    return [...this.inventoryRecords.values()].map((row) => ({
+      device_id: String(row[0]),
+      run_id: String(row[1]),
+      record_id: String(row[2]),
+      record_type: String(row[3]),
+      profile: String(row[4]),
+      schema_version: row[5] === null || row[5] === undefined ? null : String(row[5]),
+      scanner_version: row[6] === null || row[6] === undefined ? null : String(row[6]),
+      scan_time: row[7] === null || row[7] === undefined ? null : String(row[7]),
+      ecosystem: String(row[8]),
+      package_name: String(row[9]),
+      normalized_name: String(row[10]),
+      version: row[11] === null || row[11] === undefined ? null : String(row[11]),
+      root_kind: row[12] === null || row[12] === undefined ? null : String(row[12]),
+      install_scope: row[13] === null || row[13] === undefined ? null : String(row[13]),
+      package_manager: row[14] === null || row[14] === undefined ? null : String(row[14]),
+      source_type: row[15] === null || row[15] === undefined ? null : String(row[15]),
+      direct_dependency: row[16] === null || row[16] === undefined ? null : Number(row[16]),
+      has_lifecycle_scripts: Number(row[17] || 0),
+      confidence: row[18] === null || row[18] === undefined ? null : String(row[18]),
+      requested_spec: row[19] === null || row[19] === undefined ? null : String(row[19]),
+      server_name: row[20] === null || row[20] === undefined ? null : String(row[20]),
+      received_at: String(row[27])
+    }));
+  }
+
+  currentRows(): Array<{
+    device_id: string;
+    profile: string;
+    record_id: string;
+    run_id: string;
+    schema_version: string | null;
+    scanner_version: string | null;
+    scan_time: string | null;
+    ecosystem: string;
+    package_name: string;
+    normalized_name: string;
+    version: string | null;
+    root_kind: string | null;
+    install_scope: string | null;
+    package_manager: string | null;
+    source_type: string | null;
+    direct_dependency: number | null;
+    has_lifecycle_scripts: number;
+    confidence: string | null;
+    requested_spec: string | null;
+    server_name: string | null;
+    observed_at: string;
+  }> {
+    return [...this.inventoryCurrent.values()].map((row) => ({
+      device_id: String(row[0]),
+      profile: String(row[1]),
+      record_id: String(row[2]),
+      run_id: String(row[3]),
+      schema_version: row[4] === null || row[4] === undefined ? null : String(row[4]),
+      scanner_version: row[5] === null || row[5] === undefined ? null : String(row[5]),
+      scan_time: row[6] === null || row[6] === undefined ? null : String(row[6]),
+      ecosystem: String(row[7]),
+      package_name: String(row[8]),
+      normalized_name: String(row[9]),
+      version: row[10] === null || row[10] === undefined ? null : String(row[10]),
+      root_kind: row[11] === null || row[11] === undefined ? null : String(row[11]),
+      install_scope: row[12] === null || row[12] === undefined ? null : String(row[12]),
+      package_manager: row[13] === null || row[13] === undefined ? null : String(row[13]),
+      source_type: row[14] === null || row[14] === undefined ? null : String(row[14]),
+      direct_dependency: row[15] === null || row[15] === undefined ? null : Number(row[15]),
+      has_lifecycle_scripts: Number(row[16] || 0),
+      confidence: row[17] === null || row[17] === undefined ? null : String(row[17]),
+      requested_spec: row[18] === null || row[18] === undefined ? null : String(row[18]),
+      server_name: row[19] === null || row[19] === undefined ? null : String(row[19]),
+      observed_at: String(row[20])
+    }));
   }
 
   healthRows(profile: string): Array<{
@@ -416,7 +789,7 @@ function adminHeaders(env: Env): HeadersInit {
 
 function forbiddenVisibilityFields(body: unknown): string[] {
   const text = JSON.stringify(body);
-  return ["summary_json", "object_key", "hmac_key_ciphertext", "hmac_key_nonce", "body_sha256"]
+  return ["summary_json", "object_key", "hmac_key_ciphertext", "hmac_key_nonce", "body_sha256", "source_file", "project_path"]
     .filter((field) => text.includes(field));
 }
 
@@ -486,6 +859,81 @@ async function ingestSummary(env: Env & { DB: MemoryD1 }, deviceID: string, hmac
   expect(response.status).toBe(200);
 }
 
+function packageRecord(runID: string, deviceID: string, name = "left-pad", version = "1.3.0", profile = "baseline"): object {
+  return {
+    record_type: "package",
+    record_id: `package:${profile}:${name}:${version}`,
+    schema_version: "0.1.0",
+    scanner_name: "bumblebee",
+    scanner_version: "v-test",
+    run_id: runID,
+    scan_time: "2026-05-27T00:00:00.000Z",
+    endpoint: { device_id: deviceID },
+    profile,
+    ecosystem: "npm",
+    package_name: name,
+    normalized_name: name,
+    version,
+    root_kind: "project_root",
+    package_manager: "npm",
+    source_type: "package-lock",
+    source_file: "redacted-by-api",
+    direct_dependency: true,
+    has_lifecycle_scripts: false,
+    confidence: "high"
+  };
+}
+
+function findingRecord(runID: string, deviceID: string, profile = "baseline"): object {
+  return {
+    record_type: "finding",
+    record_id: `finding:${profile}:left-pad:1.3.0:advisory-1`,
+    schema_version: "0.1.0",
+    scanner_name: "bumblebee",
+    scanner_version: "v-test",
+    run_id: runID,
+    scan_time: "2026-05-27T00:00:00.000Z",
+    endpoint: { device_id: deviceID },
+    profile,
+    finding_type: "package_exposure",
+    severity: "critical",
+    catalog_id: "advisory-1",
+    catalog_name: "left-pad test advisory",
+    ecosystem: "npm",
+    package_name: "left-pad",
+    normalized_name: "left-pad",
+    version: "1.3.0",
+    root_kind: "project_root",
+    source_type: "package-lock",
+    source_file: "redacted-by-api",
+    confidence: "high",
+    evidence: "exact test match"
+  };
+}
+
+function summaryRecord(runID: string, deviceID: string, profile = "baseline", status = "complete"): object {
+  return {
+    record_type: "scan_summary",
+    record_id: `summary:${profile}:${runID}:${status}`,
+    schema_version: "0.1.0",
+    scanner_name: "bumblebee",
+    scanner_version: "v-test",
+    run_id: runID,
+    scan_time: "2026-05-27T00:00:00.000Z",
+    end_time: "2026-05-27T00:00:01.000Z",
+    endpoint: { device_id: deviceID },
+    profile,
+    status,
+    package_records_emitted: 1,
+    findings_emitted: 0,
+    duplicates: 0,
+    diagnostics_count: 0,
+    files_considered: 1,
+    timed_out: false,
+    duration_ms: 1000
+  };
+}
+
 function setRunReceivedAt(env: Env & { DB: MemoryD1 }, runID: string, receivedAt: string): void {
   for (const batch of env.DB.batches) {
     if (String(batch[2]) === runID) {
@@ -508,12 +956,20 @@ describe("bumblebee hive worker", () => {
     const env = makeEnv();
     const redirect = await worker.fetch(new Request("https://hive.example.test/admin"), env);
     const page = await worker.fetch(new Request("https://hive.example.test/admin/"), env);
+    const devicePath = await worker.fetch(new Request("https://hive.example.test/admin/devices/device-1?inventory_view=package"), env);
+    const appAsset = await worker.fetch(new Request("https://hive.example.test/admin/app.js"), env);
 
     expect(redirect.status).toBe(302);
     expect(redirect.headers.get("Location")).toBe("/admin/");
     expect(page.status).toBe(200);
     expect(page.headers.get("Content-Type")).toContain("text/html");
     expect(await page.text()).toContain("Bumblebee Hive Admin");
+    expect(devicePath.status).toBe(200);
+    expect(devicePath.headers.get("Content-Type")).toContain("text/html");
+    expect(await devicePath.text()).toContain("Bumblebee Hive Admin");
+    expect(appAsset.status).toBe(200);
+    expect(appAsset.headers.get("Content-Type")).toContain("application/javascript");
+    expect(await appAsset.text()).toBe("app");
   });
 
   it("enrolls a device behind Access", async () => {
@@ -552,6 +1008,228 @@ describe("bumblebee hive worker", () => {
     expect(env.DB.batches).toHaveLength(1);
     expect(env.DB.runs).toHaveLength(1);
     expect(env.NORMALIZE_QUEUE.messages).toHaveLength(1);
+  });
+
+  it("normalizes complete package batches into current inventory idempotently", async () => {
+    const env = makeEnv();
+    const hmacKey = "device-secret";
+    await addDevice(env, "device-1", hmacKey);
+    const ndjson = [
+      JSON.stringify(packageRecord("run-1", "device-1")),
+      JSON.stringify(findingRecord("run-1", "device-1")),
+      JSON.stringify(summaryRecord("run-1", "device-1"))
+    ].join("\n") + "\n";
+
+    const response = await worker.fetch(await signedRequest(env, gzipSync(ndjson), hmacKey), env);
+    expect(response.status).toBe(200);
+    const message = env.NORMALIZE_QUEUE.messages[0] as { device_id: string; run_id: string; batch_id: string };
+
+    await testInternals.normalizeQueuedBatch(env, message);
+    await testInternals.normalizeQueuedBatch(env, message);
+
+    expect(env.DB.inventoryRecords.size).toBe(2);
+    expect(env.DB.inventoryCurrent.size).toBe(1);
+    expect(env.DB.exposureFindings.size).toBe(1);
+    const packageResponse = await worker.fetch(new Request("https://hive.example.test/v1/admin/packages?query=left-pad", {
+      headers: adminHeaders(env)
+    }), env);
+    const packageBody = await packageResponse.json() as { view: string; packages: Array<{ normalized_name: string; occurrence_count: number; record_id?: string; source_file?: string; project_path?: string }> };
+    expect(packageResponse.status).toBe(200);
+    expect(packageBody.view).toBe("summary");
+    expect(packageBody.packages).toEqual([expect.objectContaining({ normalized_name: "left-pad", occurrence_count: 1 })]);
+    expect(packageBody.packages[0].record_id).toBeUndefined();
+    expect(packageBody.packages[0].source_file).toBeUndefined();
+    expect(packageBody.packages[0].project_path).toBeUndefined();
+    expect(forbiddenVisibilityFields(packageBody)).toEqual([]);
+  });
+
+  it("defaults package inventory to deduped summaries and keeps explicit observations available", async () => {
+    const env = makeEnv();
+    const hmacKey = "device-secret";
+    await addDevice(env, "device-1", hmacKey);
+    const lockRecord = packageRecord("run-1", "device-1", "left-pad", "1.3.0");
+    const moduleRecord = {
+      ...packageRecord("run-1", "device-1", "left-pad", "1.3.0"),
+      record_id: "package:baseline:left-pad:1.3.0:node_modules",
+      root_kind: "user_package_root",
+      source_type: "node_modules",
+      direct_dependency: false,
+      has_lifecycle_scripts: true
+    };
+    const ndjson = [
+      JSON.stringify(lockRecord),
+      JSON.stringify(moduleRecord),
+      JSON.stringify(summaryRecord("run-1", "device-1"))
+    ].join("\n") + "\n";
+
+    const response = await worker.fetch(await signedRequest(env, gzipSync(ndjson), hmacKey), env);
+    expect(response.status).toBe(200);
+    await testInternals.normalizeQueuedBatch(env, env.NORMALIZE_QUEUE.messages[0] as { device_id: string; run_id: string; batch_id: string });
+
+    const summaryResponse = await worker.fetch(new Request("https://hive.example.test/v1/admin/packages?query=left-pad", {
+      headers: adminHeaders(env)
+    }), env);
+    const observationResponse = await worker.fetch(new Request("https://hive.example.test/v1/admin/packages?query=left-pad&view=observations", {
+      headers: adminHeaders(env)
+    }), env);
+    const summaryBody = await summaryResponse.json() as {
+      view: string;
+      packages: Array<{
+        normalized_name: string;
+        occurrence_count: number;
+        source_types: string[];
+        root_kinds: string[];
+        has_lifecycle_scripts: boolean;
+        direct_dependency_present: boolean;
+        record_id?: string;
+      }>;
+    };
+    const observationBody = await observationResponse.json() as { view: string; packages: Array<{ normalized_name: string; record_id: string }> };
+
+    expect(summaryResponse.status).toBe(200);
+    expect(summaryBody.view).toBe("summary");
+    expect(summaryBody.packages).toHaveLength(1);
+    expect(summaryBody.packages[0]).toEqual(expect.objectContaining({
+      normalized_name: "left-pad",
+      occurrence_count: 2,
+      source_types: ["node_modules", "package-lock"],
+      root_kinds: ["project_root", "user_package_root"],
+      has_lifecycle_scripts: true,
+      direct_dependency_present: true
+    }));
+    expect(summaryBody.packages[0].record_id).toBeUndefined();
+    expect(observationResponse.status).toBe(200);
+    expect(observationBody.view).toBe("observations");
+    expect(observationBody.packages).toHaveLength(2);
+    expect(observationBody.packages.every((pkg) => pkg.normalized_name === "left-pad" && pkg.record_id)).toBe(true);
+    expect(forbiddenVisibilityFields(summaryBody)).toEqual([]);
+    expect(forbiddenVisibilityFields(observationBody)).toEqual([]);
+  });
+
+  it("groups package-family inventory by package while preserving version detail and device boundaries", async () => {
+    const env = makeEnv();
+    const hmacKey = "device-secret";
+    await addDevice(env, "device-1", hmacKey);
+    await addDevice(env, "device-2", hmacKey);
+    const deviceOneNDJSON = [
+      JSON.stringify(packageRecord("run-1", "device-1", "left-pad", "1.0.0")),
+      JSON.stringify(packageRecord("run-1", "device-1", "left-pad", "2.0.0")),
+      JSON.stringify(summaryRecord("run-1", "device-1"))
+    ].join("\n") + "\n";
+    const deviceTwoNDJSON = [
+      JSON.stringify(packageRecord("run-2", "device-2", "left-pad", "1.0.0")),
+      JSON.stringify(summaryRecord("run-2", "device-2"))
+    ].join("\n") + "\n";
+
+    const deviceOneResponse = await worker.fetch(await signedRequest(env, gzipSync(deviceOneNDJSON), hmacKey, {
+      "X-Inventory-Device-Id": "device-1"
+    }), env);
+    const deviceTwoResponse = await worker.fetch(await signedRequest(env, gzipSync(deviceTwoNDJSON), hmacKey, {
+      "X-Inventory-Device-Id": "device-2"
+    }), env);
+    expect(deviceOneResponse.status).toBe(200);
+    expect(deviceTwoResponse.status).toBe(200);
+    await testInternals.normalizeQueuedBatch(env, env.NORMALIZE_QUEUE.messages[0] as { device_id: string; run_id: string; batch_id: string });
+    await testInternals.normalizeQueuedBatch(env, env.NORMALIZE_QUEUE.messages[1] as { device_id: string; run_id: string; batch_id: string });
+
+    const familyResponse = await worker.fetch(new Request("https://hive.example.test/v1/admin/packages?query=left-pad&view=package", {
+      headers: adminHeaders(env)
+    }), env);
+    const familyBody = await familyResponse.json() as {
+      view: string;
+      packages: Array<{
+        device_id: string;
+        normalized_name: string;
+        version_count: number;
+        total_occurrence_count: number;
+        versions: Array<{ version: string; occurrence_count: number }>;
+        record_id?: string;
+      }>;
+    };
+
+    expect(familyResponse.status).toBe(200);
+    expect(familyBody.view).toBe("package");
+    expect(familyBody.packages).toHaveLength(2);
+    const deviceOnePackage = familyBody.packages.find((pkg) => pkg.device_id === "device-1");
+    const deviceTwoPackage = familyBody.packages.find((pkg) => pkg.device_id === "device-2");
+    expect(deviceOnePackage).toEqual(expect.objectContaining({
+      normalized_name: "left-pad",
+      version_count: 2,
+      total_occurrence_count: 2
+    }));
+    expect(deviceOnePackage?.versions.map((version) => version.version).sort()).toEqual(["1.0.0", "2.0.0"]);
+    expect(deviceTwoPackage).toEqual(expect.objectContaining({
+      normalized_name: "left-pad",
+      version_count: 1,
+      total_occurrence_count: 1
+    }));
+    expect(deviceOnePackage?.record_id).toBeUndefined();
+    expect(forbiddenVisibilityFields(familyBody)).toEqual([]);
+  });
+
+  it("promotes current inventory only after a complete baseline or project summary", async () => {
+    const env = makeEnv();
+    const hmacKey = "device-secret";
+    await addDevice(env, "device-1", hmacKey);
+    const packageOnly = JSON.stringify(packageRecord("run-1", "device-1")) + "\n";
+    const packageResponse = await worker.fetch(await signedRequest(env, gzipSync(packageOnly), hmacKey), env);
+    expect(packageResponse.status).toBe(200);
+    await testInternals.normalizeQueuedBatch(env, env.NORMALIZE_QUEUE.messages[0] as { device_id: string; run_id: string; batch_id: string });
+    expect(env.DB.inventoryRecords.size).toBe(1);
+    expect(env.DB.inventoryCurrent.size).toBe(0);
+
+    const summaryOnly = JSON.stringify(summaryRecord("run-1", "device-1")) + "\n";
+    const summaryResponse = await worker.fetch(await signedRequest(env, gzipSync(summaryOnly), hmacKey), env);
+    expect(summaryResponse.status).toBe(200);
+    await testInternals.normalizeQueuedBatch(env, env.NORMALIZE_QUEUE.messages[1] as { device_id: string; run_id: string; batch_id: string });
+    expect(env.DB.inventoryCurrent.size).toBe(1);
+  });
+
+  it("keeps deep inventory out of current state while preserving evidence", async () => {
+    const env = makeEnv();
+    const hmacKey = "device-secret";
+    await addDevice(env, "device-1", hmacKey);
+    const ndjson = [
+      JSON.stringify(packageRecord("run-deep", "device-1", "campaign-only", "9.9.9", "deep")),
+      JSON.stringify(summaryRecord("run-deep", "device-1", "deep", "complete"))
+    ].join("\n") + "\n";
+
+    const response = await worker.fetch(await signedRequest(env, gzipSync(ndjson), hmacKey), env);
+    expect(response.status).toBe(200);
+    await testInternals.normalizeQueuedBatch(env, env.NORMALIZE_QUEUE.messages[0] as { device_id: string; run_id: string; batch_id: string });
+
+    expect(env.DB.inventoryRecords.size).toBe(1);
+    expect(env.DB.inventoryCurrent.size).toBe(0);
+  });
+
+  it("returns UI package inventory with Access JWT and no admin token", async () => {
+    const env = makeEnv();
+    const hmacKey = "device-secret";
+    await addDevice(env, "device-1", hmacKey);
+    const ndjson = [
+      JSON.stringify(packageRecord("run-1", "device-1")),
+      JSON.stringify(summaryRecord("run-1", "device-1"))
+    ].join("\n") + "\n";
+    const ingestResponse = await worker.fetch(await signedRequest(env, gzipSync(ndjson), hmacKey), env);
+    expect(ingestResponse.status).toBe(200);
+    await testInternals.normalizeQueuedBatch(env, env.NORMALIZE_QUEUE.messages[0] as { device_id: string; run_id: string; batch_id: string });
+
+    const token = await accessJWT(env);
+    const packagesResponse = await worker.fetch(new Request("https://hive.example.test/v1/ui/admin/packages?query=left&view=package", {
+      headers: { "Cf-Access-Jwt-Assertion": token }
+    }), env);
+    const detailResponse = await worker.fetch(new Request("https://hive.example.test/v1/ui/admin/devices/device-1/packages?view=package", {
+      headers: { "Cf-Access-Jwt-Assertion": token }
+    }), env);
+
+    const packagesBody = await packagesResponse.json() as { view: string };
+    const detailBody = await detailResponse.json() as { view: string };
+    expect(packagesResponse.status).toBe(200);
+    expect(detailResponse.status).toBe(200);
+    expect(packagesBody.view).toBe("package");
+    expect(detailBody.view).toBe("package");
+    expect(forbiddenVisibilityFields(packagesBody)).toEqual([]);
+    expect(forbiddenVisibilityFields(detailBody)).toEqual([]);
   });
 
   it("accepts partial batches before the final scan summary", async () => {

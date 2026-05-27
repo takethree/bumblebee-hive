@@ -22,3 +22,8 @@ database_id = "00000000-0000-0000-0000-000000000000"
 [[queues.producers]]
 binding = "NORMALIZE_QUEUE"
 queue = "bumblebee-hive-normalize"
+
+[[queues.consumers]]
+queue = "bumblebee-hive-normalize"
+max_batch_size = 10
+max_batch_timeout = 30

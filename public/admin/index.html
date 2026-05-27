@@ -141,6 +141,24 @@
           <table>
             <thead>
               <tr>
+                <th>Package</th>
+                <th>Ecosystem</th>
+                <th>Versions</th>
+                <th>Profile</th>
+                <th>Occurrences</th>
+                <th>Sources</th>
+                <th>Observed</th>
+              </tr>
+            </thead>
+            <tbody id="detail-packages-body">
+              <tr><td colspan="6">No current packages.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
                 <th>Run</th>
                 <th>Profile</th>
                 <th>Status</th>
@@ -150,6 +168,60 @@
               </tr>
             </thead>
             <tbody id="detail-runs-body"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-header">
+          <h2>Inventory</h2>
+          <div class="filters">
+            <fieldset class="segments" aria-label="Inventory grouping">
+              <legend>Grouping</legend>
+              <label>
+                <input type="radio" name="package-view" value="package">
+                <span>Package</span>
+              </label>
+              <label>
+                <input type="radio" name="package-view" value="summary">
+                <span>Version</span>
+              </label>
+              <label>
+                <input type="radio" name="package-view" value="observations">
+                <span>Observations</span>
+              </label>
+            </fieldset>
+            <label>
+              Search
+              <input id="package-query" type="search" placeholder="package name">
+            </label>
+            <label>
+              Ecosystem
+              <input id="package-ecosystem" type="text" placeholder="npm">
+            </label>
+            <label>
+              Profile
+              <input id="package-profile" type="text" placeholder="baseline">
+            </label>
+          </div>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Package</th>
+                <th>Ecosystem</th>
+                <th>Versions</th>
+                <th>Device</th>
+                <th>Profile</th>
+                <th>Occurrences</th>
+                <th>Sources</th>
+                <th>Observed</th>
+              </tr>
+            </thead>
+            <tbody id="packages-body">
+              <tr><td colspan="8">Loading inventory...</td></tr>
+            </tbody>
           </table>
         </div>
       </section>
