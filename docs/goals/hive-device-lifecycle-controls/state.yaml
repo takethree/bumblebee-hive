@@ -39,7 +39,7 @@ rules:
   missing_input_or_credentials_do_not_stop_goal: true
   goal_pressure_requires_oracle: true
   no_completion_on_weak_proof: true
-active_task: T005
+active_task: T006
 tasks:
   - id: T001
     type: judge
@@ -211,7 +211,7 @@ tasks:
   - id: T005
     type: worker
     assignee: Worker
-    status: active
+    status: blocked
     objective: "Complete the remaining live UI lifecycle proof after the operator provides the UI action allowlist and an allowlisted browser Access session."
     allowed_files:
       - "README.md"
@@ -230,6 +230,40 @@ tasks:
       - "No disposable or explicitly approved device is available for live disable/enable."
       - "No authenticated browser Access session is available for an allowlisted actor."
       - "The smoke would expose tokens, raw device IDs, user identities, hostnames, usernames, SIDs, full local paths, or raw inventory payloads."
+    receipt:
+      result: blocked
+      note: "See notes/T005-blocked.md."
+      changed_files:
+        - "docs/goals/hive-device-lifecycle-controls/state.yaml"
+        - "docs/goals/hive-device-lifecycle-controls/notes/T005-blocked.md"
+      commands:
+        - cmd: "git status --short --branch"
+          status: pass
+        - cmd: "npx wrangler secret list --config wrangler.deploy.toml"
+          status: pass
+        - cmd: "GoalBuddy state checker before blocking"
+          status: pass
+      summary: "Blocked on operator-approved UI action allowlist and an authenticated allowlisted browser Access actor. Production has no UI_ADMIN_ACTION_EMAILS or UI_ADMIN_ACTION_DOMAINS secret, and this session cannot automate Chrome because the Codex Chrome Extension is not installed in the detected profile."
+      blocked_on:
+        - "Operator-approved UI_ADMIN_ACTION_EMAILS or UI_ADMIN_ACTION_DOMAINS value."
+        - "Authenticated browser Access session whose JWT contains an allowlisted email actor claim."
+        - "Disposable or explicitly approved device for UI disable/enable smoke."
+  - id: T006
+    type: pm
+    assignee: PM
+    status: active
+    objective: "Resume UI lifecycle smoke when the operator provides the allowlist value and browser Access actor prerequisites."
+    allowed_files:
+      - "docs/goals/hive-device-lifecycle-controls/state.yaml"
+      - "docs/goals/hive-device-lifecycle-controls/notes/**"
+    verify:
+      - "Confirm UI_ADMIN_ACTION_EMAILS or UI_ADMIN_ACTION_DOMAINS can be configured from explicit operator input."
+      - "Confirm an authenticated browser Access session is available for an allowlisted actor."
+      - "Confirm the live UI disable/enable target is disposable or explicitly approved."
+    stop_if:
+      - "Operator input is still missing."
+      - "Browser Access session is still unavailable."
+      - "No disposable or approved target device is available."
     receipt: null
   - id: T999
     type: judge
