@@ -1,10 +1,10 @@
 version: 2
 goal:
-  status: active
+  status: done
   title: Developer Rollout Readiness And Enrollment Wave Runbook
   slug: developer-rollout-readiness
   created_at: "2026-05-26"
-  first_milestone_complete: false
+  first_milestone_complete: true
   intake:
     original_request: "$goalbuddy:goal-prep"
     interpreted_outcome: "Prepare and execute a runbook-hardening slice for Bumblebee + Hive per-user developer rollout readiness."
@@ -30,7 +30,7 @@ rules:
   missing_input_or_credentials_do_not_stop_goal: true
   goal_pressure_requires_oracle: true
   no_completion_on_weak_proof: true
-active_task: T999
+active_task: null
 tasks:
   - id: T001
     type: judge
@@ -164,7 +164,7 @@ tasks:
   - id: T999
     type: judge
     assignee: Judge
-    status: active
+    status: done
     objective: "Final audit: decide whether the full rollout-readiness oracle is satisfied and whether the goal can close."
     allowed_files:
       - "docs/goals/developer-rollout-readiness/state.yaml"
@@ -175,3 +175,8 @@ tasks:
     stop_if:
       - "Any final proof is weak, missing, stale, or contains sensitive values."
       - "The docs cannot be followed by a per-user pilot operator without hidden configuration."
+    receipt:
+      result: done
+      decision: complete
+      full_outcome_complete: true
+      note: "See notes/T999-final-audit.md. The Hive developer rollout runbook exists and is linked; Bumblebee docs point to it generically; release, installer, verifier, Hive tests, redaction checks, diff hygiene, commits, and pushes are verified; no live token rotation, second-machine enrollment, API/scanner/installer semantic change, or production Access policy change occurred."
