@@ -35,6 +35,32 @@ Production deployment requires real Cloudflare resource IDs and secrets in `wran
 For a sequenced per-user Windows developer pilot, use
 [docs/developer-rollout-runbook.md](docs/developer-rollout-runbook.md).
 
+## Admin UI
+
+Hive serves a read-only operator dashboard at `/admin/`. The dashboard uses
+Cloudflare Access for browser authentication and calls same-origin
+`/v1/ui/admin/*` metadata routes. Browser code does not store or send
+`X-Hive-Admin-Token`; that token remains limited to script/operator API calls
+against `/v1/admin/*`.
+
+Configure these Worker values before using the UI:
+
+```powershell
+npx wrangler secret put ACCESS_TEAM_DOMAIN
+npx wrangler secret put ACCESS_AUD
+```
+
+`ACCESS_TEAM_DOMAIN` is the Cloudflare Access team domain, for example
+`example.cloudflareaccess.com`. `ACCESS_AUD` is the application AUD tag for
+the protected Hive application. The UI routes validate the
+`Cf-Access-Jwt-Assertion` header against the Access JWKS before returning
+metadata.
+
+The UI is intentionally read-only in this phase. It shows overview totals,
+devices, device detail, and runs, but it does not expose raw inventory records,
+`summary_json`, R2 object keys, HMAC material, Access credentials, local user
+names, SIDs, hostnames, or profile paths.
+
 ## Windows Bootstrapper
 
 The self-service installer downloads Bumblebee, verifies the release checksum,

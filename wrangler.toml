@@ -2,6 +2,11 @@ name = "bumblebee-hive"
 main = "src/index.ts"
 compatibility_date = "2026-05-26"
 
+[assets]
+directory = "./public"
+binding = "ASSETS"
+run_worker_first = true
+
 [[r2_buckets]]
 binding = "RAW_BATCHES"
 bucket_name = "bumblebee-hive-raw"

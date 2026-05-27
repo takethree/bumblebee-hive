@@ -1,11 +1,16 @@
+import { createRemoteJWKSet, jwtVerify } from "jose";
+
 export interface Env {
   ACCESS_CLIENT_ID: string;
   ACCESS_CLIENT_SECRET: string;
+  ACCESS_TEAM_DOMAIN?: string;
+  ACCESS_AUD?: string;
   ADMIN_TOKEN: string;
   ENROLLMENT_TOKEN: string;
   HIVE_KEY_ENCRYPTION_KEY: string;
   RAW_BATCHES: R2Bucket;
   DB: D1Database;
+  ASSETS?: Fetcher;
   NORMALIZE_QUEUE?: Queue;
   MAX_BODY_BYTES?: string;
   TIMESTAMP_SKEW_SECONDS?: string;
@@ -83,11 +88,18 @@ const accessJWTHeader = "Cf-Access-Jwt-Assertion";
 const adminTokenHeader = "X-Hive-Admin-Token";
 const defaultMaxBodyBytes = 5 * 1024 * 1024;
 const defaultTimestampSkewSeconds = 300;
+const accessJWKSByURL = new Map<string, ReturnType<typeof createRemoteJWKSet>>();
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
     try {
+      if (request.method === "GET" && url.pathname === "/admin") {
+        return new Response(null, { status: 302, headers: { Location: "/admin/" } });
+      }
+      if (request.method === "GET" && url.pathname.startsWith("/admin/")) {
+        return await serveAdminAsset(request, env, url);
+      }
       if (request.method === "GET" && url.pathname === "/v1/health") {
         return json({ ok: true });
       }
@@ -104,15 +116,28 @@ export default {
       if (request.method === "GET" && url.pathname === "/v1/admin/overview") {
         return await adminOverview(request, env);
       }
+      if (request.method === "GET" && url.pathname === "/v1/ui/admin/overview") {
+        return await uiAdminOverview(request, env);
+      }
       if (request.method === "GET" && url.pathname === "/v1/admin/devices") {
         return await adminDevices(request, env, url);
+      }
+      if (request.method === "GET" && url.pathname === "/v1/ui/admin/devices") {
+        return await uiAdminDevices(request, env, url);
       }
       const deviceMatch = url.pathname.match(/^\/v1\/admin\/devices\/([^/]+)$/);
       if (request.method === "GET" && deviceMatch) {
         return await adminDeviceDetail(request, env, deviceMatch[1]);
       }
+      const uiDeviceMatch = url.pathname.match(/^\/v1\/ui\/admin\/devices\/([^/]+)$/);
+      if (request.method === "GET" && uiDeviceMatch) {
+        return await uiAdminDeviceDetail(request, env, uiDeviceMatch[1]);
+      }
       if (request.method === "GET" && url.pathname === "/v1/admin/runs") {
         return await adminRuns(request, env, url);
+      }
+      if (request.method === "GET" && url.pathname === "/v1/ui/admin/runs") {
+        return await uiAdminRuns(request, env, url);
       }
       return json({ error: "not_found" }, 404);
     } catch (error) {
@@ -122,6 +147,13 @@ export default {
     }
   }
 };
+
+async function serveAdminAsset(request: Request, env: Env, url: URL): Promise<Response> {
+  if (!env.ASSETS) {
+    throw new HttpError(404, "admin_ui_not_configured");
+  }
+  return env.ASSETS.fetch(new Request(url, request));
+}
 
 async function enroll(request: Request, env: Env): Promise<Response> {
   requireAccess(request, env);
@@ -235,7 +267,15 @@ async function disableDevice(request: Request, env: Env, rawDeviceID: string): P
 
 async function adminOverview(request: Request, env: Env): Promise<Response> {
   requireAdminRequest(request, env);
+  return adminJson(await adminOverviewData(env));
+}
 
+async function uiAdminOverview(request: Request, env: Env): Promise<Response> {
+  await requireUIAdminRequest(request, env);
+  return adminJson(await adminOverviewData(env));
+}
+
+async function adminOverviewData(env: Env): Promise<object> {
   const devices = await env.DB.prepare(
     "SELECT COUNT(*) AS total_devices, SUM(CASE WHEN disabled_at IS NULL THEN 1 ELSE 0 END) AS active_devices, SUM(CASE WHEN disabled_at IS NOT NULL THEN 1 ELSE 0 END) AS disabled_devices FROM devices"
   ).first<AdminOverviewRow>();
@@ -246,7 +286,7 @@ async function adminOverview(request: Request, env: Env): Promise<Response> {
     "SELECT COUNT(*) AS total_batches, SUM(record_count) AS total_records FROM batches"
   ).first<AdminBatchTotalRow>();
 
-  return adminJson({
+  return {
     devices: {
       total: devices?.total_devices || 0,
       active: devices?.active_devices || 0,
@@ -261,12 +301,20 @@ async function adminOverview(request: Request, env: Env): Promise<Response> {
       total: batches?.total_batches || 0,
       records: batches?.total_records || 0
     }
-  });
+  };
 }
 
 async function adminDevices(request: Request, env: Env, url: URL): Promise<Response> {
   requireAdminRequest(request, env);
+  return adminJson(await adminDevicesData(env, url));
+}
 
+async function uiAdminDevices(request: Request, env: Env, url: URL): Promise<Response> {
+  await requireUIAdminRequest(request, env);
+  return adminJson(await adminDevicesData(env, url));
+}
+
+async function adminDevicesData(env: Env, url: URL): Promise<object> {
   const status = url.searchParams.get("status") || "active";
   if (!["active", "disabled", "all"].includes(status)) {
     throw new HttpError(400, "invalid_status_filter");
@@ -282,17 +330,25 @@ async function adminDevices(request: Request, env: Env, url: URL): Promise<Respo
     env.DB.prepare(`${adminDeviceSelect()} ${where} ORDER BY COALESCE(last_run_received_at, d.created_at) DESC LIMIT ? OFFSET ?`).bind(limit, offset)
   );
 
-  return adminJson({
+  return {
     devices: rows.map(formatAdminDeviceRow),
     limit,
     offset,
     status
-  });
+  };
 }
 
 async function adminDeviceDetail(request: Request, env: Env, rawDeviceID: string): Promise<Response> {
   requireAdminRequest(request, env);
+  return adminJson(await adminDeviceDetailData(env, rawDeviceID));
+}
 
+async function uiAdminDeviceDetail(request: Request, env: Env, rawDeviceID: string): Promise<Response> {
+  await requireUIAdminRequest(request, env);
+  return adminJson(await adminDeviceDetailData(env, rawDeviceID));
+}
+
+async function adminDeviceDetailData(env: Env, rawDeviceID: string): Promise<object> {
   const deviceID = sanitizeDeviceID(decodeURIComponent(rawDeviceID));
   if (!deviceID) {
     throw new HttpError(400, "invalid_device_id");
@@ -305,15 +361,23 @@ async function adminDeviceDetail(request: Request, env: Env, rawDeviceID: string
     env.DB.prepare(`${adminRunSelect()} WHERE r.device_id = ? ORDER BY r.received_at DESC LIMIT 10`).bind(deviceID)
   );
 
-  return adminJson({
+  return {
     device: formatAdminDeviceRow(device),
     recent_runs: rowsWithCounts(runs)
-  });
+  };
 }
 
 async function adminRuns(request: Request, env: Env, url: URL): Promise<Response> {
   requireAdminRequest(request, env);
+  return adminJson(await adminRunsData(env, url));
+}
 
+async function uiAdminRuns(request: Request, env: Env, url: URL): Promise<Response> {
+  await requireUIAdminRequest(request, env);
+  return adminJson(await adminRunsData(env, url));
+}
+
+async function adminRunsData(env: Env, url: URL): Promise<object> {
   const where: string[] = [];
   const values: (string | number)[] = [];
   const deviceID = url.searchParams.get("device_id");
@@ -340,11 +404,11 @@ async function adminRuns(request: Request, env: Env, url: URL): Promise<Response
     env.DB.prepare(`${adminRunSelect()} ${whereSQL} ORDER BY r.received_at DESC LIMIT ? OFFSET ?`).bind(...values)
   );
 
-  return adminJson({
+  return {
     runs: rowsWithCounts(rows),
     limit,
     offset
-  });
+  };
 }
 
 function adminDeviceSelect(): string {
@@ -432,6 +496,32 @@ function requireAccess(request: Request, env: Env): void {
 function requireAdminRequest(request: Request, env: Env): void {
   requireAccess(request, env);
   requireAdminToken(request, env);
+}
+
+async function requireUIAdminRequest(request: Request, env: Env): Promise<void> {
+  const token = request.headers.get(accessJWTHeader);
+  if (!token) {
+    throw new HttpError(403, "missing_access_jwt");
+  }
+  const teamDomain = normalizeAccessTeamDomain(env.ACCESS_TEAM_DOMAIN || "");
+  if (!teamDomain || !env.ACCESS_AUD) {
+    throw new HttpError(503, "missing_access_jwt_config");
+  }
+  const issuer = `https://${teamDomain}`;
+  const certsURL = `${issuer}/cdn-cgi/access/certs`;
+  let jwks = accessJWKSByURL.get(certsURL);
+  if (!jwks) {
+    jwks = createRemoteJWKSet(new URL(certsURL));
+    accessJWKSByURL.set(certsURL, jwks);
+  }
+  try {
+    await jwtVerify(token, jwks, {
+      audience: env.ACCESS_AUD,
+      issuer
+    });
+  } catch {
+    throw new HttpError(403, "invalid_access_jwt");
+  }
 }
 
 function requireAdminToken(request: Request, env: Env): void {
@@ -560,6 +650,11 @@ function sanitizeDeviceID(value: string): string {
   return trimmed;
 }
 
+function normalizeAccessTeamDomain(value: string): string {
+  const withoutProtocol = value.trim().replace(/^https?:\/\//, "").replace(/\/.*$/, "");
+  return /^[A-Za-z0-9.-]+$/.test(withoutProtocol) ? withoutProtocol : "";
+}
+
 async function encryptSecret(env: Env, secret: string): Promise<{ ciphertext: string; nonce: string }> {
   const key = await importAesKey(env.HIVE_KEY_ENCRYPTION_KEY);
   const nonce = crypto.getRandomValues(new Uint8Array(12));
@@ -667,5 +762,6 @@ class HttpError extends Error {
 
 export const testInternals = {
   encryptSecret,
-  hmacSha256Hex
+  hmacSha256Hex,
+  normalizeAccessTeamDomain
 };

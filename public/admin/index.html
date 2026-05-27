@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Bumblebee Hive Admin</title>
+    <link rel="stylesheet" href="/admin/styles.css">
+  </head>
+  <body>
+    <header class="topbar">
+      <div>
+        <h1>Bumblebee Hive</h1>
+        <p id="last-refresh">Not loaded</p>
+      </div>
+      <div class="actions">
+        <label class="toggle">
+          <input id="auto-refresh" type="checkbox">
+          <span>Auto-refresh</span>
+        </label>
+        <button id="refresh" type="button">Refresh</button>
+      </div>
+    </header>
+
+    <main>
+      <section class="metrics" aria-label="Overview">
+        <article>
+          <span>Devices</span>
+          <strong id="metric-devices">-</strong>
+          <small id="metric-device-detail">active - / disabled -</small>
+        </article>
+        <article>
+          <span>Runs</span>
+          <strong id="metric-runs">-</strong>
+          <small id="metric-run-detail">complete -</small>
+        </article>
+        <article>
+          <span>Batches</span>
+          <strong id="metric-batches">-</strong>
+          <small id="metric-records">records -</small>
+        </article>
+        <article>
+          <span>Latest Run</span>
+          <strong id="metric-latest">-</strong>
+          <small>metadata only</small>
+        </article>
+      </section>
+
+      <section class="panel">
+        <div class="panel-header">
+          <h2>Devices</h2>
+          <div class="filters">
+            <label>
+              Status
+              <select id="device-status">
+                <option value="active">Active</option>
+                <option value="disabled">Disabled</option>
+                <option value="all">All</option>
+              </select>
+            </label>
+          </div>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Device</th>
+                <th>Status</th>
+                <th>Runs</th>
+                <th>Batches</th>
+                <th>Records</th>
+                <th>Last Run</th>
+              </tr>
+            </thead>
+            <tbody id="devices-body">
+              <tr><td colspan="6">Loading devices...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="panel detail" id="device-detail" hidden>
+        <div class="panel-header">
+          <h2 id="detail-title">Device</h2>
+          <button id="clear-device" type="button">Clear</button>
+        </div>
+        <div id="detail-summary" class="detail-grid"></div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Run</th>
+                <th>Profile</th>
+                <th>Status</th>
+                <th>Batches</th>
+                <th>Records</th>
+                <th>Received</th>
+              </tr>
+            </thead>
+            <tbody id="detail-runs-body"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-header">
+          <h2>Runs</h2>
+          <div class="filters">
+            <label>
+              Status
+              <select id="run-status">
+                <option value="">Any</option>
+                <option value="complete">Complete</option>
+                <option value="partial">Partial</option>
+                <option value="error">Error</option>
+              </select>
+            </label>
+            <label>
+              Profile
+              <input id="run-profile" type="text" placeholder="baseline">
+            </label>
+          </div>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Run</th>
+                <th>Device</th>
+                <th>Profile</th>
+                <th>Status</th>
+                <th>Batches</th>
+                <th>Records</th>
+                <th>Received</th>
+              </tr>
+            </thead>
+            <tbody id="runs-body">
+              <tr><td colspan="7">Loading runs...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <p id="error" class="error" role="alert" hidden></p>
+    </main>
+
+    <script src="/admin/app.js" type="module"></script>
+  </body>
+</html>

@@ -1,4 +1,5 @@
 import { gzipSync } from "node:zlib";
+import { exportJWK, generateKeyPair, SignJWT } from "jose";
 import { describe, expect, it } from "vitest";
 import worker, { Env, testInternals } from "../src/index";
 
@@ -15,6 +16,20 @@ class MemoryQueue {
 
   async send(message: unknown): Promise<void> {
     this.messages.push(message);
+  }
+}
+
+class MemoryAssets {
+  async fetch(request: Request): Promise<Response> {
+    const path = new URL(request.url).pathname;
+    if (path === "/admin/") {
+      return new Response("<!doctype html><title>Bumblebee Hive Admin</title>", {
+        headers: { "Content-Type": "text/html; charset=utf-8" }
+      });
+    }
+    return new Response("asset", {
+      headers: { "Content-Type": "text/plain; charset=utf-8" }
+    });
   }
 }
 
@@ -232,15 +247,18 @@ function base64url(bytes: Uint8Array): string {
   return Buffer.from(bytes).toString("base64url");
 }
 
-function makeEnv(): Env & { RAW_BATCHES: MemoryR2; DB: MemoryD1; NORMALIZE_QUEUE: MemoryQueue } {
+function makeEnv(): Env & { RAW_BATCHES: MemoryR2; DB: MemoryD1; NORMALIZE_QUEUE: MemoryQueue; ASSETS: MemoryAssets } {
   return {
     ACCESS_CLIENT_ID: "access-id",
     ACCESS_CLIENT_SECRET: "access-secret",
+    ACCESS_TEAM_DOMAIN: "team.example.cloudflareaccess.com",
+    ACCESS_AUD: "access-aud",
     ADMIN_TOKEN: "admin-token",
     ENROLLMENT_TOKEN: "enroll-token",
     HIVE_KEY_ENCRYPTION_KEY: base64url(crypto.getRandomValues(new Uint8Array(32))),
     RAW_BATCHES: new MemoryR2() as unknown as MemoryR2 & R2Bucket,
     DB: new MemoryD1() as unknown as MemoryD1 & D1Database,
+    ASSETS: new MemoryAssets() as unknown as MemoryAssets & Fetcher,
     NORMALIZE_QUEUE: new MemoryQueue() as unknown as MemoryQueue & Queue
   };
 }
@@ -267,6 +285,36 @@ function forbiddenVisibilityFields(body: unknown): string[] {
   const text = JSON.stringify(body);
   return ["summary_json", "object_key", "hmac_key_ciphertext", "hmac_key_nonce", "body_sha256"]
     .filter((field) => text.includes(field));
+}
+
+let accessTestKeyPair: CryptoKeyPair | null = null;
+let accessTestJWK: unknown | null = null;
+
+async function accessJWT(env: Env, audience = env.ACCESS_AUD || "access-aud"): Promise<string> {
+  if (!accessTestKeyPair || !accessTestJWK) {
+    accessTestKeyPair = await generateKeyPair("RS256");
+    const jwk = await exportJWK(accessTestKeyPair.publicKey);
+    accessTestJWK = { ...jwk, kid: "test-key", alg: "RS256" };
+  }
+  const jwk = accessTestJWK;
+  const certsURL = `https://${env.ACCESS_TEAM_DOMAIN}/cdn-cgi/access/certs`;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = typeof input === "string" || input instanceof URL ? String(input) : input.url;
+    if (url === certsURL) {
+      return new Response(JSON.stringify({ keys: [jwk] }), {
+        headers: { "Content-Type": "application/json" }
+      });
+    }
+    return originalFetch(input, init);
+  }) as typeof fetch;
+  return new SignJWT({ sub: "operator@example.test" })
+    .setProtectedHeader({ alg: "RS256", kid: "test-key" })
+    .setIssuer(`https://${env.ACCESS_TEAM_DOMAIN}`)
+    .setAudience(audience)
+    .setIssuedAt()
+    .setExpirationTime("2h")
+    .sign(accessTestKeyPair.privateKey);
 }
 
 async function signedRequest(env: Env, body: Uint8Array, hmacKey: string, overrides: HeadersInit = {}): Promise<Request> {
@@ -305,6 +353,18 @@ async function ingestSummary(env: Env & { DB: MemoryD1 }, deviceID: string, hmac
 }
 
 describe("bumblebee hive worker", () => {
+  it("serves the admin UI entry through the assets binding", async () => {
+    const env = makeEnv();
+    const redirect = await worker.fetch(new Request("https://hive.example.test/admin"), env);
+    const page = await worker.fetch(new Request("https://hive.example.test/admin/"), env);
+
+    expect(redirect.status).toBe(302);
+    expect(redirect.headers.get("Location")).toBe("/admin/");
+    expect(page.status).toBe(200);
+    expect(page.headers.get("Content-Type")).toContain("text/html");
+    expect(await page.text()).toContain("Bumblebee Hive Admin");
+  });
+
   it("enrolls a device behind Access", async () => {
     const env = makeEnv();
     const response = await worker.fetch(new Request("https://hive.example.test/v1/enroll", {
@@ -495,6 +555,70 @@ describe("bumblebee hive worker", () => {
       batches: { total: 1, records: 2 }
     });
     expect(forbiddenVisibilityFields(body)).toEqual([]);
+  });
+
+  it("returns UI admin metadata with a valid Access JWT and no admin token", async () => {
+    const env = makeEnv();
+    await ingestSummary(env, "device-1", "device-secret", "run-1");
+    const token = await accessJWT(env);
+
+    const response = await worker.fetch(new Request("https://hive.example.test/v1/ui/admin/overview", {
+      headers: { "Cf-Access-Jwt-Assertion": token }
+    }), env);
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("Cache-Control")).toBe("no-store");
+    expect(body).toMatchObject({
+      devices: { total: 1, active: 1, disabled: 0 },
+      runs: { total: 1, complete: 1 },
+      batches: { total: 1, records: 2 }
+    });
+    expect(forbiddenVisibilityFields(body)).toEqual([]);
+  });
+
+  it("returns UI device detail and runs with a valid Access JWT", async () => {
+    const env = makeEnv();
+    await ingestSummary(env, "device-1", "device-secret", "run-1");
+    const token = await accessJWT(env);
+    const headers = { "Cf-Access-Jwt-Assertion": token };
+
+    const devicesResponse = await worker.fetch(new Request("https://hive.example.test/v1/ui/admin/devices?status=all", { headers }), env);
+    const detailResponse = await worker.fetch(new Request("https://hive.example.test/v1/ui/admin/devices/device-1", { headers }), env);
+    const runsResponse = await worker.fetch(new Request("https://hive.example.test/v1/ui/admin/runs?profile=baseline", { headers }), env);
+
+    expect(devicesResponse.status).toBe(200);
+    expect(detailResponse.status).toBe(200);
+    expect(runsResponse.status).toBe(200);
+    expect(forbiddenVisibilityFields(await devicesResponse.json())).toEqual([]);
+    expect(forbiddenVisibilityFields(await detailResponse.json())).toEqual([]);
+    expect(forbiddenVisibilityFields(await runsResponse.json())).toEqual([]);
+  });
+
+  it("rejects UI admin metadata without a valid Access JWT", async () => {
+    const env = makeEnv();
+
+    const missing = await worker.fetch(new Request("https://hive.example.test/v1/ui/admin/overview"), env);
+    const wrongAudience = await worker.fetch(new Request("https://hive.example.test/v1/ui/admin/overview", {
+      headers: { "Cf-Access-Jwt-Assertion": await accessJWT(env, "wrong-audience") }
+    }), env);
+
+    expect(missing.status).toBe(403);
+    expect(await missing.json()).toEqual({ error: "missing_access_jwt" });
+    expect(wrongAudience.status).toBe(403);
+    expect(await wrongAudience.json()).toEqual({ error: "invalid_access_jwt" });
+  });
+
+  it("keeps token-based admin routes separate from browser UI routes", async () => {
+    const env = makeEnv();
+    const token = await accessJWT(env);
+
+    const response = await worker.fetch(new Request("https://hive.example.test/v1/admin/overview", {
+      headers: { "Cf-Access-Jwt-Assertion": token }
+    }), env);
+
+    expect(response.status).toBe(401);
+    expect(await response.json()).toEqual({ error: "invalid_admin_token" });
   });
 
   it("lists active and disabled devices with last-run metadata only", async () => {

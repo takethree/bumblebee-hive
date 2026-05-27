@@ -1,0 +1,181 @@
+const state = {
+  selectedDeviceId: "",
+  autoRefreshTimer: 0
+};
+
+const el = {
+  refresh: document.querySelector("#refresh"),
+  autoRefresh: document.querySelector("#auto-refresh"),
+  lastRefresh: document.querySelector("#last-refresh"),
+  error: document.querySelector("#error"),
+  deviceStatus: document.querySelector("#device-status"),
+  runStatus: document.querySelector("#run-status"),
+  runProfile: document.querySelector("#run-profile"),
+  devicesBody: document.querySelector("#devices-body"),
+  runsBody: document.querySelector("#runs-body"),
+  detail: document.querySelector("#device-detail"),
+  detailTitle: document.querySelector("#detail-title"),
+  detailSummary: document.querySelector("#detail-summary"),
+  detailRunsBody: document.querySelector("#detail-runs-body"),
+  clearDevice: document.querySelector("#clear-device")
+};
+
+function text(id, value) {
+  document.querySelector(id).textContent = value;
+}
+
+function formatNumber(value) {
+  return Number(value || 0).toLocaleString();
+}
+
+function formatTime(value) {
+  if (!value) return "-";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
+}
+
+function shortId(value) {
+  if (!value) return "-";
+  return value.length > 18 ? `${value.slice(0, 8)}...${value.slice(-6)}` : value;
+}
+
+function statusBadge(value) {
+  const status = value || "unknown";
+  return `<span class="status ${classToken(status)}">${escapeHtml(status)}</span>`;
+}
+
+function escapeHtml(value) {
+  return String(value ?? "").replace(/[&<>"']/g, (char) => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    '"': "&quot;",
+    "'": "&#39;"
+  })[char]);
+}
+
+function classToken(value) {
+  return String(value ?? "").replace(/[^a-zA-Z0-9_-]/g, "");
+}
+
+async function getJSON(path) {
+  const response = await fetch(path, {
+    headers: { Accept: "application/json" },
+    credentials: "same-origin"
+  });
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({}));
+    throw new Error(body.error || `Request failed with ${response.status}`);
+  }
+  return response.json();
+}
+
+async function loadOverview() {
+  const overview = await getJSON("/v1/ui/admin/overview");
+  text("#metric-devices", formatNumber(overview.devices.total));
+  text("#metric-device-detail", `active ${formatNumber(overview.devices.active)} / disabled ${formatNumber(overview.devices.disabled)}`);
+  text("#metric-runs", formatNumber(overview.runs.total));
+  text("#metric-run-detail", `complete ${formatNumber(overview.runs.complete)}`);
+  text("#metric-batches", formatNumber(overview.batches.total));
+  text("#metric-records", `records ${formatNumber(overview.batches.records)}`);
+  text("#metric-latest", formatTime(overview.runs.latest_received_at));
+}
+
+async function loadDevices() {
+  const status = encodeURIComponent(el.deviceStatus.value);
+  const data = await getJSON(`/v1/ui/admin/devices?status=${status}&limit=50&offset=0`);
+  if (data.devices.length === 0) {
+    el.devicesBody.innerHTML = '<tr><td colspan="6">No devices found.</td></tr>';
+    return;
+  }
+  el.devicesBody.innerHTML = data.devices.map((device) => `
+    <tr data-device-id="${escapeHtml(device.device_id)}">
+      <td title="${escapeHtml(device.device_id)}">${escapeHtml(shortId(device.device_id))}</td>
+      <td>${statusBadge(device.status)}</td>
+      <td>${formatNumber(device.run_count)}</td>
+      <td>${formatNumber(device.batch_count)}</td>
+      <td>${formatNumber(device.record_count)}</td>
+      <td>${device.last_run ? `${escapeHtml(device.last_run.profile || "-")} / ${escapeHtml(device.last_run.status || "-")}<br>${escapeHtml(formatTime(device.last_run.received_at))}` : "-"}</td>
+    </tr>
+  `).join("");
+}
+
+async function loadRuns() {
+  const params = new URLSearchParams({ limit: "50", offset: "0" });
+  if (state.selectedDeviceId) params.set("device_id", state.selectedDeviceId);
+  if (el.runStatus.value) params.set("status", el.runStatus.value);
+  if (el.runProfile.value.trim()) params.set("profile", el.runProfile.value.trim());
+  const data = await getJSON(`/v1/ui/admin/runs?${params.toString()}`);
+  if (data.runs.length === 0) {
+    el.runsBody.innerHTML = '<tr><td colspan="7">No runs found.</td></tr>';
+    return;
+  }
+  el.runsBody.innerHTML = data.runs.map((run) => `
+    <tr>
+      <td title="${escapeHtml(run.run_id)}">${escapeHtml(shortId(run.run_id))}</td>
+      <td title="${escapeHtml(run.device_id)}">${escapeHtml(shortId(run.device_id))}</td>
+      <td>${escapeHtml(run.profile || "-")}</td>
+      <td>${statusBadge(run.status)}</td>
+      <td>${formatNumber(run.batch_count)}</td>
+      <td>${formatNumber(run.record_count)}</td>
+      <td>${escapeHtml(formatTime(run.received_at))}</td>
+    </tr>
+  `).join("");
+}
+
+async function loadDeviceDetail(deviceId) {
+  state.selectedDeviceId = deviceId;
+  const data = await getJSON(`/v1/ui/admin/devices/${encodeURIComponent(deviceId)}`);
+  el.detail.hidden = false;
+  el.detailTitle.textContent = `Device ${shortId(data.device.device_id)}`;
+  el.detailSummary.innerHTML = [
+    ["Status", data.device.status],
+    ["Runs", formatNumber(data.device.run_count)],
+    ["Batches", formatNumber(data.device.batch_count)],
+    ["Records", formatNumber(data.device.record_count)]
+  ].map(([label, value]) => `<div><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`).join("");
+  el.detailRunsBody.innerHTML = data.recent_runs.length === 0
+    ? '<tr><td colspan="6">No recent runs.</td></tr>'
+    : data.recent_runs.map((run) => `
+      <tr>
+        <td title="${escapeHtml(run.run_id)}">${escapeHtml(shortId(run.run_id))}</td>
+        <td>${escapeHtml(run.profile || "-")}</td>
+        <td>${statusBadge(run.status)}</td>
+        <td>${formatNumber(run.batch_count)}</td>
+        <td>${formatNumber(run.record_count)}</td>
+        <td>${escapeHtml(formatTime(run.received_at))}</td>
+      </tr>
+    `).join("");
+  await loadRuns();
+}
+
+async function refreshAll() {
+  el.error.hidden = true;
+  try {
+    await Promise.all([loadOverview(), loadDevices(), loadRuns()]);
+    el.lastRefresh.textContent = `Last refreshed ${new Date().toLocaleString()}`;
+  } catch (error) {
+    el.error.textContent = error instanceof Error ? error.message : "Unable to load admin metadata.";
+    el.error.hidden = false;
+  }
+}
+
+el.refresh.addEventListener("click", refreshAll);
+el.deviceStatus.addEventListener("change", refreshAll);
+el.runStatus.addEventListener("change", loadRuns);
+el.runProfile.addEventListener("change", loadRuns);
+el.clearDevice.addEventListener("click", () => {
+  state.selectedDeviceId = "";
+  el.detail.hidden = true;
+  loadRuns();
+});
+el.devicesBody.addEventListener("click", (event) => {
+  const row = event.target.closest("tr[data-device-id]");
+  if (row) loadDeviceDetail(row.dataset.deviceId);
+});
+el.autoRefresh.addEventListener("change", () => {
+  if (state.autoRefreshTimer) clearInterval(state.autoRefreshTimer);
+  state.autoRefreshTimer = el.autoRefresh.checked ? setInterval(refreshAll, 30000) : 0;
+});
+
+refreshAll();

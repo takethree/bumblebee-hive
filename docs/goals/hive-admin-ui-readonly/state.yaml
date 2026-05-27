@@ -1,0 +1,238 @@
+version: 2
+goal:
+  status: done
+  title: Hive Admin UI Read-Only MVP
+  slug: hive-admin-ui-readonly
+  created_at: "2026-05-27"
+  first_milestone_complete: true
+  intake:
+    original_request: "$goalbuddy:goal-prep"
+    interpreted_outcome: "Implement a read-only Hive admin UI at /admin/ using vanilla static assets and Cloudflare Access JWT-protected metadata-only UI routes."
+    input_shape: existing_plan
+    audience: "Hive operators who need live device and run visibility without using raw API commands."
+    authority: approved
+    proof_type: demo
+    completion_proof: "An operator can load /admin/ through Cloudflare Access and see overview, device, device detail, and run metadata; automated tests prove auth separation and data minimization."
+    existing_plan_facts:
+      - "Read-only MVP; no disable/revoke action in this tranche."
+      - "Use vanilla static assets, not React/Vite."
+      - "Browser UI must not hold ADMIN_TOKEN."
+      - "Use Cloudflare Access JWT validation for UI routes."
+      - "Existing /v1/admin/* routes remain token-protected script/operator APIs."
+      - "New UI routes should live under /v1/ui/admin/*."
+      - "Add ACCESS_TEAM_DOMAIN and ACCESS_AUD configuration for Access JWT validation."
+  oracle:
+    signal: "Authenticated /admin/ dashboard loads live metadata via /v1/ui/admin/* without browser-held admin tokens or forbidden fields."
+    final_proof: "Tests, static secret scans, deploy validation, and if available a browser or live smoke prove the read-only dashboard and UI API satisfy the metadata-only auth boundary."
+agents:
+  scout: bundled_not_installed
+  worker: bundled_not_installed
+  judge: bundled_not_installed
+visual_board:
+  selected: local
+  status: blocked
+  url: null
+  note: "Local board startup failed before serving a URL: goalbuddy catalog fetch returned HTTP 404. Generated board logs were kept outside the repo because the error stream includes local machine paths."
+rules:
+  continuous_until_full_outcome: true
+  missing_input_or_credentials_do_not_stop_goal: true
+  goal_pressure_requires_oracle: true
+  no_completion_on_weak_proof: true
+active_task: null
+tasks:
+  - id: T001
+    type: judge
+    assignee: Judge
+    status: done
+    objective: "Validate the approved read-only admin UI plan against the current Hive Worker, tests, Wrangler config, and Cloudflare Access/static-assets constraints; choose the exact Worker package."
+    allowed_files:
+      - "docs/goals/hive-admin-ui-readonly/state.yaml"
+      - "docs/goals/hive-admin-ui-readonly/notes/**"
+    verify:
+      - "Read-only validation only: inspect current Worker routes, tests, Wrangler configs, package scripts, and official Cloudflare docs as needed."
+      - "Emit a Judge receipt with decision, current-state facts, exact Worker objective, allowed_files, verify commands, and stop_if conditions."
+    stop_if:
+      - "The plan would require putting ADMIN_TOKEN, Access client secrets, enrollment tokens, HMAC keys, or Hive encryption keys in browser JavaScript."
+      - "The plan would expose raw inventory, summary_json, R2 object keys, HMAC material, hostnames, usernames, SIDs, or full local profile paths."
+      - "The plan would weaken existing /v1/admin/* token requirements."
+    receipt:
+      result: done
+      decision: proceed
+      note: "See notes/T001-judge.md. Implement one read-only admin UI package with vanilla static assets, ASSETS binding, /v1/ui/admin/* Access-JWT routes, shared metadata formatting, tests, docs, and secret scans."
+  - id: T002
+    type: worker
+    assignee: Worker
+    status: done
+    objective: "Implement the largest safe read-only admin UI MVP package selected by Judge."
+    allowed_files:
+      - "src/index.ts"
+      - "public/admin/**"
+      - "test/**"
+      - "package.json"
+      - "package-lock.json"
+      - "wrangler.toml"
+      - "wrangler.deploy.toml"
+      - "README.md"
+      - "docs/goals/hive-admin-ui-readonly/state.yaml"
+      - "docs/goals/hive-admin-ui-readonly/notes/**"
+    verify:
+      - "npm test"
+      - "npm run typecheck"
+      - "npm run lint"
+      - "Wrangler deploy dry-run or equivalent validation if available without mutating production state."
+      - "Static sensitive-value scan over public/admin, src, tests, docs, and GoalBuddy receipts."
+      - "Browser or HTTP smoke for /admin/ and /v1/ui/admin/* when locally feasible."
+      - "git diff --check"
+    stop_if:
+      - "Need to expose ADMIN_TOKEN, Access client secrets, enrollment tokens, HMAC keys, Hive encryption keys, raw inventory, summary_json, R2 object keys, hostnames, usernames, SIDs, or full local profile paths."
+      - "Need to add write actions such as disabling or revoking devices."
+      - "Need to change production Cloudflare Access policy or rotate secrets."
+      - "Need files outside allowed_files."
+    receipt:
+      result: done
+      changed_files:
+        - "src/index.ts"
+        - "public/admin/index.html"
+        - "public/admin/styles.css"
+        - "public/admin/app.js"
+        - "test/ingest.test.ts"
+        - "package.json"
+        - "package-lock.json"
+        - "wrangler.toml"
+        - "README.md"
+        - "docs/goals/hive-admin-ui-readonly/state.yaml"
+        - "docs/goals/hive-admin-ui-readonly/notes/T001-judge.md"
+        - "docs/goals/hive-admin-ui-readonly/notes/T002-implementation.md"
+      commands:
+        - cmd: "npm install jose"
+          status: pass
+        - cmd: "npm test"
+          status: pass
+        - cmd: "npm run typecheck"
+          status: pass
+        - cmd: "npm run lint"
+          status: pass
+        - cmd: "npm run build"
+          status: pass
+        - cmd: "npx wrangler deploy --config wrangler.toml --dry-run"
+          status: pass
+        - cmd: "npx wrangler deploy --config wrangler.deploy.toml --dry-run"
+          status: pass
+        - cmd: "node --check public/admin/app.js"
+          status: pass
+        - cmd: "Static UI link check"
+          status: pass
+        - cmd: "Browser-visible static asset sensitive-value scan"
+          status: pass
+        - cmd: "Repo/org sensitive-value scan"
+          status: pass
+        - cmd: "git diff --check"
+          status: pass
+      summary: "Implemented the read-only admin UI MVP with vanilla assets, Access-JWT UI routes, shared metadata-only formatting, Wrangler assets config, docs, and tests. Existing token-protected /v1/admin/* routes remain separate."
+  - id: T003
+    type: worker
+    assignee: Worker
+    status: done
+    objective: "Deploy or prepare deployment proof for the read-only admin UI and record redacted live or local evidence."
+    allowed_files:
+      - "README.md"
+      - "docs/goals/hive-admin-ui-readonly/state.yaml"
+      - "docs/goals/hive-admin-ui-readonly/notes/**"
+    verify:
+      - "If deployment credentials/config are available, deploy the Worker and smoke /admin/ through Access with redacted evidence."
+      - "If live deployment is not available, record the precise skipped condition and preserve local/deploy-dry-run proof."
+      - "Confirm browser-visible code contains no secret literals or org-specific values."
+      - "git status --short --branch"
+    stop_if:
+      - "Live deployment would require missing credentials or unapproved Cloudflare Access policy changes."
+      - "Smoke evidence would print tokens, tenant IDs, user identities, device IDs, hostnames, usernames, SIDs, or full local paths."
+    receipt:
+      result: done
+      note: "See notes/T003-deploy-proof.md."
+      changed_files:
+        - "docs/goals/hive-admin-ui-readonly/state.yaml"
+        - "docs/goals/hive-admin-ui-readonly/notes/T003-deploy-proof.md"
+      commands:
+        - cmd: "npx wrangler secret list --config wrangler.deploy.toml"
+          status: pass
+        - cmd: "npx wrangler secret put ACCESS_TEAM_DOMAIN --config wrangler.deploy.toml"
+          status: pass
+        - cmd: "npx wrangler secret put ACCESS_AUD --config wrangler.deploy.toml"
+          status: pass
+        - cmd: "npx wrangler deploy --config wrangler.deploy.toml"
+          status: pass
+        - cmd: "Live Access smoke for /admin/app.js, /v1/ui/admin/overview, /v1/ui/admin/devices, and /v1/ui/admin/runs"
+          status: pass
+      summary: "Configured the Access JWT secrets from Access redirect metadata, deployed the Worker/assets package, and verified live UI API metadata routes through Cloudflare Access. Live smoke found /admin/ returned a 307 asset redirect, so T004 was spawned for a narrow entrypoint fix."
+      spawned_tasks:
+        - T004
+  - id: T004
+    type: worker
+    assignee: Worker
+    status: done
+    objective: "Fix the live /admin/ dashboard entrypoint so it serves the static HTML without a redirect loop, then redeploy and smoke it."
+    allowed_files:
+      - "src/index.ts"
+      - "test/ingest.test.ts"
+      - "docs/goals/hive-admin-ui-readonly/state.yaml"
+      - "docs/goals/hive-admin-ui-readonly/notes/**"
+    verify:
+      - "npm test"
+      - "npm run typecheck"
+      - "npm run lint"
+      - "npm run build"
+      - "npx wrangler deploy --config wrangler.deploy.toml"
+      - "Live smoke /admin/, /admin/app.js, /v1/ui/admin/overview, /v1/ui/admin/devices, and /v1/ui/admin/runs through Access with redacted evidence."
+      - "git diff --check"
+    stop_if:
+      - "The fix requires changing Cloudflare Access policy."
+      - "The fix requires exposing any admin token, service token secret, raw inventory, identity fields, device IDs, hostnames, usernames, SIDs, or full local paths in receipts."
+    receipt:
+      result: done
+      note: "See notes/T004-entrypoint-fix.md."
+      changed_files:
+        - "src/index.ts"
+        - "test/ingest.test.ts"
+        - "docs/goals/hive-admin-ui-readonly/state.yaml"
+        - "docs/goals/hive-admin-ui-readonly/notes/T003-deploy-proof.md"
+        - "docs/goals/hive-admin-ui-readonly/notes/T004-entrypoint-fix.md"
+      commands:
+        - cmd: "npm test"
+          status: pass
+        - cmd: "npm run typecheck"
+          status: pass
+        - cmd: "npm run lint"
+          status: pass
+        - cmd: "npm run build"
+          status: pass
+        - cmd: "npx wrangler deploy --config wrangler.deploy.toml"
+          status: pass
+        - cmd: "Live Access smoke for /admin/, /admin/app.js, /v1/ui/admin/overview, /v1/ui/admin/devices, and /v1/ui/admin/runs"
+          status: pass
+        - cmd: "Browser-visible static asset sensitive-value scan"
+          status: pass
+        - cmd: "Repo/org sensitive-value scan"
+          status: pass
+        - cmd: "git diff --check"
+          status: pass
+      summary: "Fixed the /admin/ static asset entrypoint by letting the Cloudflare assets binding serve the canonical directory route. Redeployed and verified the dashboard shell plus metadata routes through Cloudflare Access."
+  - id: T999
+    type: judge
+    assignee: Judge
+    status: done
+    objective: "Final audit: decide whether the read-only admin UI MVP satisfies the original owner outcome."
+    allowed_files:
+      - "docs/goals/hive-admin-ui-readonly/state.yaml"
+      - "docs/goals/hive-admin-ui-readonly/notes/**"
+    verify:
+      - "Review changed files, task receipts, tests, secret scans, UI/API smoke evidence, and git status."
+      - "Reject completion if browser code needs ADMIN_TOKEN or if UI/API exposes forbidden raw or identity fields."
+    stop_if:
+      - "Any final proof is weak, stale, missing, or contains sensitive values."
+      - "Queued or active Worker work remains required for the read-only MVP."
+    receipt:
+      result: done
+      decision: complete
+      full_outcome_complete: true
+      note: "See notes/T999-final-audit.md."
+      summary: "The deployed read-only admin UI MVP satisfies the tranche: /admin/ serves through Access, UI API metadata routes return 200 through Access, existing token admin routes remain separate, tests and scans pass, and the only residual gap is unavailable visual browser automation."
