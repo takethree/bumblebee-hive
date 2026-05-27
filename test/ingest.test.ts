@@ -1,6 +1,6 @@
 import { gzipSync } from "node:zlib";
 import { exportJWK, generateKeyPair, SignJWT } from "jose";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import worker, { Env, testInternals } from "../src/index";
 
 class MemoryR2 {
@@ -109,6 +109,10 @@ class MemoryStmt {
         .sort((left, right) => left.received_at.localeCompare(right.received_at))
         .slice(0, limit);
       return { results: rows.map((row) => ({ device_id: row.device_id, profile: row.profile, run_id: row.run_id })) as T[] };
+    }
+    if (this.sql.includes("last_complete_received_at")) {
+      const profile = String(this.values[0]);
+      return { results: this.db.healthRows(profile) as T[] };
     }
     if (this.sql.includes("FROM devices d")) {
       let rows = this.db.adminDeviceRows();
@@ -288,6 +292,36 @@ class MemoryD1 {
       };
     });
   }
+
+  healthRows(profile: string): Array<{
+    device_id: string;
+    created_at: string;
+    last_run_id: string | null;
+    last_run_status: string | null;
+    last_run_scanner_version: string | null;
+    last_run_received_at: string | null;
+    last_complete_received_at: string | null;
+  }> {
+    const runs = this.runRows();
+    return [...this.devices.entries()]
+      .filter(([, device]) => !device.disabled_at)
+      .map(([deviceID, device]) => {
+        const profileRuns = runs
+          .filter((run) => run.device_id === deviceID && run.profile === profile)
+          .sort((left, right) => right.received_at.localeCompare(left.received_at));
+        const lastRun = profileRuns[0];
+        const lastComplete = profileRuns.find((run) => run.status === "complete");
+        return {
+          device_id: deviceID,
+          created_at: device.created_at,
+          last_run_id: lastRun?.run_id || null,
+          last_run_status: lastRun?.status || null,
+          last_run_scanner_version: lastRun?.scanner_version || null,
+          last_run_received_at: lastRun?.received_at || null,
+          last_complete_received_at: lastComplete?.received_at || null
+        };
+      });
+  }
 }
 
 function base64url(bytes: Uint8Array): string {
@@ -413,6 +447,10 @@ function setRunReceivedAt(env: Env & { DB: MemoryD1 }, runID: string, receivedAt
 }
 
 describe("bumblebee hive worker", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it("serves the admin UI entry through the assets binding", async () => {
     const env = makeEnv();
     const redirect = await worker.fetch(new Request("https://hive.example.test/admin"), env);
@@ -655,16 +693,68 @@ describe("bumblebee hive worker", () => {
     expect(forbiddenVisibilityFields(await runsResponse.json())).toEqual([]);
   });
 
+  it("returns UI health with configurable baseline stale and weekend grace", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-05-25T15:00:00.000Z"));
+    const env = makeEnv();
+    env.HEALTH_PROFILE = "baseline";
+    env.HEALTH_EXPECTED_CADENCE_HOURS = "6";
+    env.HEALTH_STALE_HOURS = "24";
+    env.HEALTH_WEEKEND_GRACE_HOURS = "72";
+    await ingestSummary(env, "device-healthy", "healthy-secret", "run-healthy", "baseline", "complete");
+    await ingestSummary(env, "device-weekend", "weekend-secret", "run-weekend", "baseline", "complete");
+    await ingestSummary(env, "device-stale", "stale-secret", "run-stale", "baseline", "complete");
+    await ingestSummary(env, "device-attention", "attention-secret", "run-attention", "baseline", "partial");
+    await addDevice(env, "device-unknown", "unknown-secret");
+    await ingestSummary(env, "device-disabled", "disabled-secret", "run-disabled", "baseline", "complete");
+    env.DB.devices.get("device-disabled")!.disabled_at = "2026-05-25T10:00:00.000Z";
+    setRunReceivedAt(env, "run-healthy", "2026-05-25T13:00:00.000Z");
+    setRunReceivedAt(env, "run-weekend", "2026-05-22T17:00:00.000Z");
+    setRunReceivedAt(env, "run-stale", "2026-05-20T12:00:00.000Z");
+    setRunReceivedAt(env, "run-attention", "2026-05-25T14:00:00.000Z");
+    const token = await accessJWT(env);
+
+    const response = await worker.fetch(new Request("https://hive.example.test/v1/ui/admin/health", {
+      headers: { "Cf-Access-Jwt-Assertion": token }
+    }), env);
+    const body = await response.json() as {
+      config: { profile: string; expected_cadence_hours: number; stale_hours: number; weekend_grace_hours: number };
+      counts: { healthy: number; stale: number; attention: number; unknown: number; total: number };
+      devices: Array<{ device_id: string; health: string; reason: string; stale_after_hours: number }>;
+    };
+    const healthByDevice = Object.fromEntries(body.devices.map((device) => [device.device_id, device]));
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("Cache-Control")).toBe("no-store");
+    expect(body.config).toEqual({
+      profile: "baseline",
+      expected_cadence_hours: 6,
+      stale_hours: 24,
+      weekend_grace_hours: 72
+    });
+    expect(body.counts).toEqual({ healthy: 2, stale: 1, attention: 1, unknown: 1, total: 5 });
+    expect(healthByDevice["device-healthy"]).toMatchObject({ health: "healthy", reason: "latest_complete_run_recent", stale_after_hours: 24 });
+    expect(healthByDevice["device-weekend"]).toMatchObject({ health: "healthy", reason: "latest_complete_run_within_weekend_grace", stale_after_hours: 72 });
+    expect(healthByDevice["device-stale"]).toMatchObject({ health: "stale", reason: "latest_complete_run_too_old", stale_after_hours: 72 });
+    expect(healthByDevice["device-attention"]).toMatchObject({ health: "attention", reason: "latest_run_not_complete" });
+    expect(healthByDevice["device-unknown"]).toMatchObject({ health: "unknown", reason: "no_monitored_profile_run" });
+    expect(healthByDevice["device-disabled"]).toBeUndefined();
+    expect(forbiddenVisibilityFields(body)).toEqual([]);
+  });
+
   it("rejects UI admin metadata without a valid Access JWT", async () => {
     const env = makeEnv();
 
     const missing = await worker.fetch(new Request("https://hive.example.test/v1/ui/admin/overview"), env);
+    const missingHealth = await worker.fetch(new Request("https://hive.example.test/v1/ui/admin/health"), env);
     const wrongAudience = await worker.fetch(new Request("https://hive.example.test/v1/ui/admin/overview", {
       headers: { "Cf-Access-Jwt-Assertion": await accessJWT(env, "wrong-audience") }
     }), env);
 
     expect(missing.status).toBe(403);
     expect(await missing.json()).toEqual({ error: "missing_access_jwt" });
+    expect(missingHealth.status).toBe(403);
+    expect(await missingHealth.json()).toEqual({ error: "missing_access_jwt" });
     expect(wrongAudience.status).toBe(403);
     expect(await wrongAudience.json()).toEqual({ error: "invalid_access_jwt" });
   });

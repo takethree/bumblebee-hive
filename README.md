@@ -61,6 +61,34 @@ devices, device detail, and runs, but it does not expose raw inventory records,
 `summary_json`, R2 object keys, HMAC material, Access credentials, local user
 names, SIDs, hostnames, or profile paths.
 
+### Operator health
+
+The dashboard includes a read-only health view backed by
+`GET /v1/ui/admin/health`. Health is computed from active devices and the latest
+run for one monitored profile. It is generic Worker configuration, not
+deployment-specific code:
+
+| Variable | Default | Meaning |
+|---|---:|---|
+| `HEALTH_PROFILE` | `baseline` | Scan profile to monitor. |
+| `HEALTH_EXPECTED_CADENCE_HOURS` | `6` | Expected recurring interval shown to operators. |
+| `HEALTH_STALE_HOURS` | `24` | Normal stale threshold for the latest complete monitored run. |
+| `HEALTH_WEEKEND_GRACE_HOURS` | `72` | Stale threshold when the interval between latest complete run and now crosses a weekend. Use `0` to disable weekend grace. |
+
+Health statuses:
+
+- `healthy`: latest monitored-profile run is complete and within the active
+  stale threshold.
+- `stale`: latest complete monitored-profile run is older than the active
+  stale threshold.
+- `attention`: latest monitored-profile run exists but is not complete.
+- `unknown`: active device has no monitored-profile run yet.
+
+Disabled devices are excluded from health counts. Health responses contain
+aggregate counts and metadata only; they do not expose raw inventory,
+`summary_json`, R2 object keys, HMAC material, Access credentials, local
+usernames, SIDs, hostnames, or profile paths.
+
 ## Retention
 
 Hive stores accepted raw batches in R2 and metadata in D1. A scheduled Worker

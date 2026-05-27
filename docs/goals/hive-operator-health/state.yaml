@@ -1,0 +1,198 @@
+version: 2
+goal:
+  status: done
+  title: Hive Operator Health
+  slug: hive-operator-health
+  created_at: "2026-05-27"
+  first_milestone_complete: true
+  intake:
+    original_request: "$goalbuddy:goal-prep"
+    interpreted_outcome: "Add generic configurable operator health to the Hive admin UI for recurring baseline runs."
+    input_shape: existing_plan
+    audience: "Hive operators monitoring recurring Bumblebee endpoint runs."
+    authority: approved
+    proof_type: demo
+    completion_proof: "Admin UI and UI API show baseline health with configurable stale/weekend grace thresholds, tests cover classifications/auth/data minimization, and deploy or dry-run proof passes."
+    existing_plan_facts:
+      - "Monitor baseline first."
+      - "Use env-driven generic config rather than Take3-specific assumptions."
+      - "Default expected cadence is 6 hours."
+      - "Default stale threshold is 24 hours."
+      - "Default weekend grace is 72 hours."
+      - "Browser UI uses Cloudflare Access JWT routes and never sends ADMIN_TOKEN."
+      - "Keep health metadata-only and do not expose raw inventory, summary_json, R2 object keys, HMAC material, Access secrets, hostnames, usernames, SIDs, or full local profile paths."
+      - "Do not add disable/revoke UI actions in this tranche."
+  oracle:
+    signal: "Authenticated /admin/ shows health counts and device health rows derived from latest baseline status using configurable thresholds."
+    final_proof: "Tests, static secret scans, Wrangler validation/deploy proof, and redacted UI/API smoke prove health behavior and metadata-only auth boundaries."
+agents:
+  scout: bundled_not_installed
+  worker: bundled_not_installed
+  judge: bundled_not_installed
+visual_board:
+  selected: local
+  status: blocked
+  url: null
+  note: "Local board startup failed before serving a URL: goalbuddy catalog fetch returned HTTP 404. Generated board logs were kept outside the repo because the error stream includes local machine paths."
+rules:
+  continuous_until_full_outcome: true
+  missing_input_or_credentials_do_not_stop_goal: true
+  goal_pressure_requires_oracle: true
+  no_completion_on_weak_proof: true
+active_task: null
+tasks:
+  - id: T001
+    type: judge
+    assignee: Judge
+    status: done
+    objective: "Validate the approved operator-health plan against current Hive admin API/UI/tests/deploy config and choose the exact Worker package."
+    allowed_files:
+      - "docs/goals/hive-operator-health/state.yaml"
+      - "docs/goals/hive-operator-health/notes/**"
+    verify:
+      - "Read-only validation only: inspect current Worker routes, admin UI assets, tests, README, Wrangler config, and deploy state as needed."
+      - "Emit a Judge receipt with decision, current-state facts, exact Worker objective, allowed_files, verify commands, and stop_if conditions."
+    stop_if:
+      - "The plan requires putting ADMIN_TOKEN, service-token secrets, enrollment tokens, HMAC keys, or Hive encryption keys in browser JavaScript."
+      - "The plan requires exposing raw inventory, summary_json, R2 object keys, HMAC material, Access secrets, hostnames, usernames, SIDs, or full local profile paths."
+      - "The plan would weaken existing /v1/admin/* token requirements."
+    receipt:
+      result: done
+      decision: proceed
+      note: "See notes/T001-judge.md."
+      full_outcome_complete: false
+      summary: "Proceed with one coherent Worker package: env-driven health config, /v1/ui/admin/health, active-device baseline health classification, admin UI health cards/table, docs, tests, and sensitive-value scans."
+  - id: T002
+    type: worker
+    assignee: Worker
+    status: done
+    objective: "Implement the validated operator-health API/UI/docs/tests package selected by Judge."
+    allowed_files:
+      - "src/index.ts"
+      - "public/admin/**"
+      - "test/**"
+      - "README.md"
+      - "wrangler.toml"
+      - "wrangler.deploy.toml"
+      - "migrations/**"
+      - "docs/goals/hive-operator-health/state.yaml"
+      - "docs/goals/hive-operator-health/notes/**"
+    verify:
+      - "npm test"
+      - "npm run typecheck"
+      - "npm run lint"
+      - "npm run build"
+      - "Wrangler deploy dry-run or equivalent validation if available without mutating production state."
+      - "Static sensitive-value scan over browser-visible assets, source, tests, README, and GoalBuddy receipts."
+      - "HTTP or browser smoke for /admin/ and /v1/ui/admin/health when feasible."
+      - "git diff --check"
+    stop_if:
+      - "Need to expose ADMIN_TOKEN, service-token secrets, enrollment tokens, HMAC keys, Hive encryption keys, raw inventory, summary_json, R2 object keys, hostnames, usernames, SIDs, or full local profile paths."
+      - "Need to add write actions such as disabling or revoking devices."
+      - "Need a schema migration or config change that Judge did not approve."
+      - "Need files outside allowed_files."
+    receipt:
+      result: done
+      note: "See notes/T002-implementation.md."
+      changed_files:
+        - "src/index.ts"
+        - "public/admin/index.html"
+        - "public/admin/styles.css"
+        - "public/admin/app.js"
+        - "test/ingest.test.ts"
+        - "README.md"
+        - "docs/goals/hive-operator-health/state.yaml"
+        - "docs/goals/hive-operator-health/notes/T001-judge.md"
+        - "docs/goals/hive-operator-health/notes/T002-implementation.md"
+      commands:
+        - cmd: "npm test"
+          status: pass
+        - cmd: "npm run typecheck"
+          status: pass
+        - cmd: "npm run lint"
+          status: pass
+        - cmd: "npm run build"
+          status: pass
+        - cmd: "node --check public/admin/app.js"
+          status: pass
+        - cmd: "npx wrangler deploy --config wrangler.toml --dry-run"
+          status: pass
+        - cmd: "npx wrangler deploy --config wrangler.deploy.toml --dry-run"
+          status: pass
+        - cmd: "Browser-visible static asset sensitive-value scan"
+          status: pass
+        - cmd: "Repo/org sensitive-value scan"
+          status: pass
+        - cmd: "git diff --check"
+          status: pass
+      summary: "Implemented generic configurable operator health for the admin UI with /v1/ui/admin/health, health cards/table, README config docs, and tests for classification/auth/data minimization."
+  - id: T003
+    type: worker
+    assignee: Worker
+    status: done
+    objective: "Deploy or prepare deployment proof for operator health and record redacted live or local evidence."
+    allowed_files:
+      - "README.md"
+      - "docs/goals/hive-operator-health/state.yaml"
+      - "docs/goals/hive-operator-health/notes/**"
+    verify:
+      - "If deployment credentials/config are available, deploy the Worker and smoke /admin/ plus /v1/ui/admin/health through Access with redacted evidence."
+      - "If live deployment is not available, record the precise skipped condition and preserve local/deploy-dry-run proof."
+      - "Confirm browser-visible code contains no secret literals or org-specific values."
+      - "git status --short --branch"
+    stop_if:
+      - "Live deployment would require missing credentials or unapproved Cloudflare Access policy changes."
+      - "Smoke evidence would print tokens, tenant IDs, user identities, device IDs, hostnames, usernames, SIDs, or full local paths."
+    receipt:
+      result: done
+      note: "See notes/T003-deploy-proof.md."
+      changed_files:
+        - "docs/goals/hive-operator-health/state.yaml"
+        - "docs/goals/hive-operator-health/notes/T003-deploy-proof.md"
+      summary: "Deployed the operator-health Worker/assets and recorded redacted live Access smoke evidence for the health API and admin UI."
+      deployed: true
+      worker_version_id: "43860340-42c7-48b9-8f9b-96d1fc87c2a7"
+      live_smoke:
+        health_status: 200
+        admin_status: 200
+        appjs_status: 200
+        profile: baseline
+        expected_cadence_hours: 6
+        stale_hours: 24
+        weekend_grace_hours: 72
+        counts:
+          total: 4
+          healthy: 1
+          stale: 0
+          attention: 0
+          unknown: 3
+      commands:
+        - cmd: "npx wrangler deploy --config wrangler.deploy.toml"
+          status: pass
+        - cmd: "Redacted Cloudflare Access live smoke for /v1/ui/admin/health, /admin/, and /admin/app.js"
+          status: pass
+        - cmd: "Browser-visible static asset sensitive-value scan"
+          status: pass
+        - cmd: "Repo/org sensitive-value scan"
+          status: pass
+  - id: T999
+    type: judge
+    assignee: Judge
+    status: done
+    objective: "Final audit: decide whether the operator-health tranche satisfies the original owner outcome."
+    allowed_files:
+      - "docs/goals/hive-operator-health/state.yaml"
+      - "docs/goals/hive-operator-health/notes/**"
+    verify:
+      - "Review changed files, task receipts, tests, secret scans, UI/API smoke evidence, deploy state, and git status."
+      - "Reject completion if browser code needs ADMIN_TOKEN or if UI/API exposes forbidden raw or identity fields."
+      - "Reject completion if health thresholds are hardcoded to Take3-specific assumptions instead of generic env defaults."
+    stop_if:
+      - "Any final proof is weak, stale, missing, or contains sensitive values."
+      - "Queued or active Worker work remains required for operator health."
+    receipt:
+      result: done
+      decision: complete
+      full_outcome_complete: true
+      note: "See notes/T999-final-audit.md."
+      summary: "Final audit approved operator health as complete: docs, tests, secret scans, deploy, and redacted live smoke prove the generic metadata-only admin health layer."

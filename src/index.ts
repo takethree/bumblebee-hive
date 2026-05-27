@@ -16,6 +16,10 @@ export interface Env {
   TIMESTAMP_SKEW_SECONDS?: string;
   RETENTION_DAYS?: string;
   RETENTION_DELETE_LIMIT?: string;
+  HEALTH_PROFILE?: string;
+  HEALTH_EXPECTED_CADENCE_HOURS?: string;
+  HEALTH_STALE_HOURS?: string;
+  HEALTH_WEEKEND_GRACE_HOURS?: string;
 }
 
 interface InventoryRecord {
@@ -76,6 +80,16 @@ interface AdminRunRow {
   record_count: number | null;
 }
 
+interface AdminHealthRow {
+  device_id: string;
+  created_at: string;
+  last_run_id: string | null;
+  last_run_status: string | null;
+  last_run_scanner_version: string | null;
+  last_run_received_at: string | null;
+  last_complete_received_at: string | null;
+}
+
 interface RetentionBatchRow {
   batch_id: string;
   object_key: string;
@@ -103,6 +117,10 @@ const defaultMaxBodyBytes = 5 * 1024 * 1024;
 const defaultTimestampSkewSeconds = 300;
 const defaultRetentionDays = 30;
 const defaultRetentionDeleteLimit = 100;
+const defaultHealthProfile = "baseline";
+const defaultHealthExpectedCadenceHours = 6;
+const defaultHealthStaleHours = 24;
+const defaultHealthWeekendGraceHours = 72;
 const accessJWKSByURL = new Map<string, ReturnType<typeof createRemoteJWKSet>>();
 
 export default {
@@ -136,6 +154,9 @@ export default {
       }
       if (request.method === "GET" && url.pathname === "/v1/ui/admin/overview") {
         return await uiAdminOverview(request, env);
+      }
+      if (request.method === "GET" && url.pathname === "/v1/ui/admin/health") {
+        return await uiAdminHealth(request, env);
       }
       if (request.method === "GET" && url.pathname === "/v1/admin/devices") {
         return await adminDevices(request, env, url);
@@ -399,6 +420,11 @@ async function uiAdminOverview(request: Request, env: Env): Promise<Response> {
   return adminJson(await adminOverviewData(env));
 }
 
+async function uiAdminHealth(request: Request, env: Env): Promise<Response> {
+  await requireUIAdminRequest(request, env);
+  return adminJson(await adminHealthData(env));
+}
+
 async function adminOverviewData(env: Env): Promise<object> {
   const devices = await env.DB.prepare(
     "SELECT COUNT(*) AS total_devices, SUM(CASE WHEN disabled_at IS NULL THEN 1 ELSE 0 END) AS active_devices, SUM(CASE WHEN disabled_at IS NOT NULL THEN 1 ELSE 0 END) AS disabled_devices FROM devices"
@@ -425,6 +451,45 @@ async function adminOverviewData(env: Env): Promise<object> {
       total: batches?.total_batches || 0,
       records: batches?.total_records || 0
     }
+  };
+}
+
+async function adminHealthData(env: Env): Promise<object> {
+  const config = healthConfig(env);
+  const rows = await allRows<AdminHealthRow>(
+    env.DB.prepare(`SELECT
+      d.device_id,
+      d.created_at,
+      (SELECT run_id FROM runs r WHERE r.device_id = d.device_id AND r.profile = ? ORDER BY received_at DESC LIMIT 1) AS last_run_id,
+      (SELECT status FROM runs r WHERE r.device_id = d.device_id AND r.profile = ? ORDER BY received_at DESC LIMIT 1) AS last_run_status,
+      (SELECT scanner_version FROM runs r WHERE r.device_id = d.device_id AND r.profile = ? ORDER BY received_at DESC LIMIT 1) AS last_run_scanner_version,
+      (SELECT received_at FROM runs r WHERE r.device_id = d.device_id AND r.profile = ? ORDER BY received_at DESC LIMIT 1) AS last_run_received_at,
+      (SELECT received_at FROM runs r WHERE r.device_id = d.device_id AND r.profile = ? AND r.status = 'complete' ORDER BY received_at DESC LIMIT 1) AS last_complete_received_at
+    FROM devices d
+    WHERE d.disabled_at IS NULL
+    ORDER BY COALESCE(last_run_received_at, d.created_at) DESC`).bind(
+      config.profile,
+      config.profile,
+      config.profile,
+      config.profile,
+      config.profile
+    )
+  );
+  const now = new Date();
+  const devices = rows.map((row) => formatHealthRow(row, config, now));
+  const counts = { healthy: 0, stale: 0, attention: 0, unknown: 0, total: devices.length };
+  for (const device of devices) {
+    counts[device.health]++;
+  }
+  return {
+    config: {
+      profile: config.profile,
+      expected_cadence_hours: config.expectedCadenceHours,
+      stale_hours: config.staleHours,
+      weekend_grace_hours: config.weekendGraceHours
+    },
+    counts,
+    devices
   };
 }
 
@@ -594,6 +659,120 @@ function rowsWithCounts(rows: AdminRunRow[]): object[] {
     batch_count: row.batch_count || 0,
     record_count: row.record_count || 0
   }));
+}
+
+type HealthStatus = "healthy" | "stale" | "attention" | "unknown";
+
+interface HealthConfig {
+  profile: string;
+  expectedCadenceHours: number;
+  staleHours: number;
+  weekendGraceHours: number;
+}
+
+interface HealthDevice {
+  device_id: string;
+  health: HealthStatus;
+  reason: string;
+  profile: string;
+  expected_cadence_hours: number;
+  stale_after_hours: number;
+  age_hours: number | null;
+  last_completed_received_at: string | null;
+  last_run: {
+    run_id: string;
+    status: string | null;
+    scanner_version: string | null;
+    received_at: string | null;
+  } | null;
+}
+
+function healthConfig(env: Env): HealthConfig {
+  const profile = (env.HEALTH_PROFILE || defaultHealthProfile).trim() || defaultHealthProfile;
+  return {
+    profile,
+    expectedCadenceHours: positiveInt(env.HEALTH_EXPECTED_CADENCE_HOURS, defaultHealthExpectedCadenceHours),
+    staleHours: positiveInt(env.HEALTH_STALE_HOURS, defaultHealthStaleHours),
+    weekendGraceHours: nonNegativeInt(env.HEALTH_WEEKEND_GRACE_HOURS, defaultHealthWeekendGraceHours)
+  };
+}
+
+function formatHealthRow(row: AdminHealthRow, config: HealthConfig, now: Date): HealthDevice {
+  const latestCompleteAt = parseDate(row.last_complete_received_at);
+  const staleAfterHours = effectiveStaleHours(latestCompleteAt, now, config);
+  const ageHours = latestCompleteAt ? roundHours((now.getTime() - latestCompleteAt.getTime()) / 3600000) : null;
+  const latestStatus = row.last_run_status || "";
+  let health: HealthStatus = "unknown";
+  let reason = "no_monitored_profile_run";
+
+  if (row.last_run_id && latestStatus !== "complete") {
+    health = "attention";
+    reason = "latest_run_not_complete";
+  } else if (latestCompleteAt && ageHours !== null) {
+    if (ageHours > staleAfterHours) {
+      health = "stale";
+      reason = "latest_complete_run_too_old";
+    } else {
+      health = "healthy";
+      reason = staleAfterHours > config.staleHours ? "latest_complete_run_within_weekend_grace" : "latest_complete_run_recent";
+    }
+  }
+
+  return {
+    device_id: row.device_id,
+    health,
+    reason,
+    profile: config.profile,
+    expected_cadence_hours: config.expectedCadenceHours,
+    stale_after_hours: staleAfterHours,
+    age_hours: ageHours,
+    last_completed_received_at: row.last_complete_received_at,
+    last_run: row.last_run_id ? {
+      run_id: row.last_run_id,
+      status: row.last_run_status,
+      scanner_version: row.last_run_scanner_version,
+      received_at: row.last_run_received_at
+    } : null
+  };
+}
+
+function effectiveStaleHours(latestCompleteAt: Date | null, now: Date, config: HealthConfig): number {
+  if (
+    latestCompleteAt &&
+    config.weekendGraceHours > config.staleHours &&
+    intervalTouchesWeekend(latestCompleteAt, now)
+  ) {
+    return config.weekendGraceHours;
+  }
+  return config.staleHours;
+}
+
+function intervalTouchesWeekend(start: Date, end: Date): boolean {
+  if (start.getTime() > end.getTime()) {
+    return false;
+  }
+  const cursor = new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth(), start.getUTCDate()));
+  const last = Date.UTC(end.getUTCFullYear(), end.getUTCMonth(), end.getUTCDate());
+  while (cursor.getTime() <= last) {
+    const day = cursor.getUTCDay();
+    if (day === 0 || day === 6) {
+      return true;
+    }
+    cursor.setUTCDate(cursor.getUTCDate() + 1);
+  }
+  return false;
+}
+
+function parseDate(value: string | null): Date | null {
+  if (!value) {
+    return null;
+  }
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+function roundHours(value: number): number {
+  return Math.round(value * 10) / 10;
 }
 
 async function allRows<T>(statement: D1PreparedStatement): Promise<T[]> {

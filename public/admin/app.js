@@ -11,6 +11,8 @@ const el = {
   deviceStatus: document.querySelector("#device-status"),
   runStatus: document.querySelector("#run-status"),
   runProfile: document.querySelector("#run-profile"),
+  healthConfig: document.querySelector("#health-config"),
+  healthBody: document.querySelector("#health-body"),
   devicesBody: document.querySelector("#devices-body"),
   runsBody: document.querySelector("#runs-body"),
   detail: document.querySelector("#device-detail"),
@@ -32,6 +34,10 @@ function formatTime(value) {
   if (!value) return "-";
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
+}
+
+function formatHours(value) {
+  return value === null || value === undefined ? "-" : `${Number(value).toLocaleString()}h`;
 }
 
 function shortId(value) {
@@ -79,6 +85,29 @@ async function loadOverview() {
   text("#metric-batches", formatNumber(overview.batches.total));
   text("#metric-records", `records ${formatNumber(overview.batches.records)}`);
   text("#metric-latest", formatTime(overview.runs.latest_received_at));
+}
+
+async function loadHealth() {
+  const data = await getJSON("/v1/ui/admin/health");
+  text("#health-healthy", formatNumber(data.counts.healthy));
+  text("#health-stale", formatNumber(data.counts.stale));
+  text("#health-attention", formatNumber(data.counts.attention));
+  text("#health-unknown", formatNumber(data.counts.unknown));
+  el.healthConfig.textContent = `${data.config.profile} every ${data.config.expected_cadence_hours}h / stale after ${data.config.stale_hours}h / weekend grace ${data.config.weekend_grace_hours}h`;
+  if (data.devices.length === 0) {
+    el.healthBody.innerHTML = '<tr><td colspan="6">No active devices found.</td></tr>';
+    return;
+  }
+  el.healthBody.innerHTML = data.devices.map((device) => `
+    <tr data-device-id="${escapeHtml(device.device_id)}">
+      <td>${statusBadge(device.health)}</td>
+      <td title="${escapeHtml(device.device_id)}">${escapeHtml(shortId(device.device_id))}</td>
+      <td>${device.last_run ? `${escapeHtml(device.last_run.status || "-")}<br>${escapeHtml(formatTime(device.last_run.received_at))}` : "-"}</td>
+      <td>${escapeHtml(formatHours(device.age_hours))}</td>
+      <td>${escapeHtml(formatHours(device.stale_after_hours))}</td>
+      <td>${escapeHtml(reasonLabel(device.reason))}</td>
+    </tr>
+  `).join("");
 }
 
 async function loadDevices() {
@@ -152,7 +181,7 @@ async function loadDeviceDetail(deviceId) {
 async function refreshAll() {
   el.error.hidden = true;
   try {
-    await Promise.all([loadOverview(), loadDevices(), loadRuns()]);
+    await Promise.all([loadOverview(), loadHealth(), loadDevices(), loadRuns()]);
     el.lastRefresh.textContent = `Last refreshed ${new Date().toLocaleString()}`;
   } catch (error) {
     el.error.textContent = error instanceof Error ? error.message : "Unable to load admin metadata.";
@@ -173,9 +202,23 @@ el.devicesBody.addEventListener("click", (event) => {
   const row = event.target.closest("tr[data-device-id]");
   if (row) loadDeviceDetail(row.dataset.deviceId);
 });
+el.healthBody.addEventListener("click", (event) => {
+  const row = event.target.closest("tr[data-device-id]");
+  if (row) loadDeviceDetail(row.dataset.deviceId);
+});
 el.autoRefresh.addEventListener("change", () => {
   if (state.autoRefreshTimer) clearInterval(state.autoRefreshTimer);
   state.autoRefreshTimer = el.autoRefresh.checked ? setInterval(refreshAll, 30000) : 0;
 });
 
 refreshAll();
+
+function reasonLabel(value) {
+  return {
+    latest_complete_run_recent: "recent complete run",
+    latest_complete_run_within_weekend_grace: "within weekend grace",
+    latest_complete_run_too_old: "latest complete run is stale",
+    latest_run_not_complete: "latest run needs attention",
+    no_monitored_profile_run: "no monitored run yet"
+  }[value] || value || "-";
+}

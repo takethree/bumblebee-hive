@@ -47,6 +47,36 @@
 
       <section class="panel">
         <div class="panel-header">
+          <h2>Health</h2>
+          <p id="health-config" class="panel-note">baseline health loading</p>
+        </div>
+        <div class="health-summary" aria-label="Health summary">
+          <span>Healthy <strong id="health-healthy">-</strong></span>
+          <span>Stale <strong id="health-stale">-</strong></span>
+          <span>Attention <strong id="health-attention">-</strong></span>
+          <span>Unknown <strong id="health-unknown">-</strong></span>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Health</th>
+                <th>Device</th>
+                <th>Last Baseline</th>
+                <th>Age</th>
+                <th>Threshold</th>
+                <th>Reason</th>
+              </tr>
+            </thead>
+            <tbody id="health-body">
+              <tr><td colspan="6">Loading health...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-header">
           <h2>Devices</h2>
           <div class="filters">
             <label>
