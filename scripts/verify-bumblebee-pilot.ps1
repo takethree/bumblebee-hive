@@ -6,6 +6,7 @@ param(
   [string]$ConfigRoot = "$env:APPDATA\Bumblebee",
   [string]$TaskName = "Bumblebee Baseline Pilot",
   [string]$AdminSecretsPath = ".local\deployment-secrets.clixml",
+  [string]$WorkersDevUrl = "",
   [int]$WaitSeconds = 180,
   [int]$PollSeconds = 5
 )
@@ -13,7 +14,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-$forbiddenFields = @("summary_json", "object_key", "hmac_key_ciphertext", "hmac_key_nonce", "body_sha256", "raw")
+$forbiddenFields = @("summary_json", "object_key", "hmac_key_ciphertext", "hmac_key_nonce", "body_sha256", "raw", "source_file", "project_path")
 $repoRoot = Split-Path -Parent $PSScriptRoot
 
 function New-Check {
@@ -126,6 +127,17 @@ function Invoke-HiveAdmin {
   }
 }
 
+function Invoke-HiveAsset {
+  param([string]$HiveBaseUrl, [string]$Path)
+  $uri = $HiveBaseUrl.TrimEnd("/") + $Path
+  $response = Invoke-WebRequest -Uri $uri -UseBasicParsing -TimeoutSec 30
+  [pscustomobject]@{
+    status_code = [int]$response.StatusCode
+    content_type = if ($response.Headers["Content-Type"]) { [string]$response.Headers["Content-Type"] } else { "" }
+    body_text = [string]$response.Content
+  }
+}
+
 function Get-LatestRun {
   param(
     [System.Net.Http.HttpClient]$Client,
@@ -178,6 +190,73 @@ function Wait-ForFreshRun {
       if ($afterPrevious -and $nearTrigger) {
         return [pscustomobject]@{ observed = $true; latest = $latest }
       }
+    }
+    Start-Sleep -Seconds $IntervalSeconds
+  } while ([DateTimeOffset]::UtcNow -lt $deadline)
+  [pscustomobject]@{ observed = $false; latest = $latest }
+}
+
+function Get-NormalizationVisibility {
+  param(
+    [System.Net.Http.HttpClient]$Client,
+    [object]$Config
+  )
+  $deviceID = [uri]::EscapeDataString([string]$Config.device_id)
+  $response = Invoke-HiveAdmin -Client $Client -HiveBaseUrl ([string]$Config.hive_base_url) -Path "/v1/admin/normalization-jobs?device_id=$deviceID&limit=5&offset=0"
+  $jobs = @(Get-JsonProperty -Object $response.body -Name "normalization_jobs")
+  [pscustomobject]@{
+    status_code = $response.status_code
+    cache_control = $response.cache_control
+    forbidden_matches = @(Test-ForbiddenFields -Body $response.body_text)
+    total = if ($null -ne (Get-JsonProperty -Object $response.body -Name "total")) { [int](Get-JsonProperty -Object $response.body -Name "total") } else { 0 }
+    returned = $jobs.Count
+    complete_count = @($jobs | Where-Object { [string]$_.status -eq "complete" }).Count
+    error_count = @($jobs | Where-Object { [string]$_.status -eq "error" }).Count
+    promoted_count = @($jobs | Where-Object { [bool]$_.promoted_current }).Count
+    latest_completed_at = if ($jobs.Count -gt 0 -and $jobs[0].completed_at) { [DateTimeOffset]::Parse([string]$jobs[0].completed_at) } else { $null }
+  }
+}
+
+function Get-DeviceDetailVisibility {
+  param(
+    [System.Net.Http.HttpClient]$Client,
+    [object]$Config
+  )
+  $deviceID = [uri]::EscapeDataString([string]$Config.device_id)
+  $response = Invoke-HiveAdmin -Client $Client -HiveBaseUrl ([string]$Config.hive_base_url) -Path "/v1/admin/devices/$deviceID"
+  $jobs = @(Get-JsonProperty -Object $response.body -Name "recent_normalization_jobs")
+  [pscustomobject]@{
+    status_code = $response.status_code
+    cache_control = $response.cache_control
+    forbidden_matches = @(Test-ForbiddenFields -Body $response.body_text)
+    recent_normalization_count = $jobs.Count
+    complete_count = @($jobs | Where-Object { [string]$_.status -eq "complete" }).Count
+    promoted_count = @($jobs | Where-Object { [bool]$_.promoted_current }).Count
+    latest_completed_at = if ($jobs.Count -gt 0 -and $jobs[0].completed_at) { [DateTimeOffset]::Parse([string]$jobs[0].completed_at) } else { $null }
+  }
+}
+
+function Wait-ForFreshNormalization {
+  param(
+    [System.Net.Http.HttpClient]$Client,
+    [object]$Config,
+    [DateTimeOffset]$StartedAt,
+    [int]$TimeoutSeconds,
+    [int]$IntervalSeconds
+  )
+  $deadline = [DateTimeOffset]::UtcNow.AddSeconds($TimeoutSeconds)
+  $latest = $null
+  do {
+    $latest = Get-NormalizationVisibility -Client $Client -Config $Config
+    if (
+      $latest.status_code -eq 200 -and
+      $latest.cache_control -eq "no-store" -and
+      $latest.forbidden_matches.Count -eq 0 -and
+      $latest.complete_count -gt 0 -and
+      $null -ne $latest.latest_completed_at -and
+      $latest.latest_completed_at -ge $StartedAt.AddSeconds(-60)
+    ) {
+      return [pscustomobject]@{ observed = $true; latest = $latest }
     }
     Start-Sleep -Seconds $IntervalSeconds
   } while ([DateTimeOffset]::UtcNow -lt $deadline)
@@ -237,6 +316,11 @@ $checks = [System.Collections.Generic.List[object]]::new()
 $failures = [System.Collections.Generic.List[string]]::new()
 $client = $null
 $config = $null
+$adminAssets = $null
+$routePosture = $null
+$normalizationVisibility = $null
+$deviceDetailVisibility = $null
+$freshNormalization = $null
 
 try {
   $configPath = Join-Path $ConfigRoot "config.json"
@@ -315,6 +399,71 @@ try {
     }
   }
 
+  $adminPage = Invoke-HiveAsset -HiveBaseUrl ([string]$config.hive_base_url) -Path "/admin/"
+  $adminScript = Invoke-HiveAsset -HiveBaseUrl ([string]$config.hive_base_url) -Path "/admin/app.js"
+  $adminAssets = [ordered]@{
+    page_status_code = $adminPage.status_code
+    page_has_title = $adminPage.body_text -like "*Bumblebee Hive Admin*"
+    script_status_code = $adminScript.status_code
+    script_has_normalization_route = $adminScript.body_text -like "*/v1/ui/admin/normalization-jobs*"
+    script_has_normalization_loader = $adminScript.body_text -like "*loadNormalizationJobs*"
+  }
+  if ($adminAssets.page_status_code -ne 200 -or -not $adminAssets.page_has_title) {
+    Add-Failure -Failures $failures -Code "admin_page_unavailable"
+  }
+  if ($adminAssets.script_status_code -ne 200 -or -not $adminAssets.script_has_normalization_route -or -not $adminAssets.script_has_normalization_loader) {
+    Add-Failure -Failures $failures -Code "admin_script_normalization_missing"
+  }
+
+  if (-not [string]::IsNullOrWhiteSpace($WorkersDevUrl)) {
+    $workersDevStatus = $null
+    try {
+      $workersDevResponse = Invoke-WebRequest -Uri ($WorkersDevUrl.TrimEnd("/") + "/admin/") -UseBasicParsing -TimeoutSec 30
+      $workersDevStatus = [int]$workersDevResponse.StatusCode
+    } catch {
+      if ($_.Exception.Response) {
+        $workersDevStatus = [int]$_.Exception.Response.StatusCode
+      } else {
+        Add-Failure -Failures $failures -Code "workers_dev_probe_failed"
+      }
+    }
+    $routePosture = [ordered]@{
+      workers_dev_checked = $true
+      workers_dev_status_code = $workersDevStatus
+      workers_dev_disabled = $workersDevStatus -eq 404
+    }
+    if ($workersDevStatus -ne 404) {
+      Add-Failure -Failures $failures -Code "workers_dev_not_disabled"
+    }
+  } else {
+    $routePosture = [ordered]@{
+      workers_dev_checked = $false
+      workers_dev_disabled = $null
+    }
+  }
+
+  $normalizationVisibility = Get-NormalizationVisibility -Client $client -Config $config
+  if ($normalizationVisibility.status_code -ne 200) {
+    Add-Failure -Failures $failures -Code "normalization_endpoint_failed"
+  }
+  if ($normalizationVisibility.cache_control -ne "no-store") {
+    Add-Failure -Failures $failures -Code "normalization_endpoint_cache_control"
+  }
+  if ($normalizationVisibility.forbidden_matches.Count -gt 0) {
+    Add-Failure -Failures $failures -Code "normalization_endpoint_forbidden_fields"
+  }
+
+  $deviceDetailVisibility = Get-DeviceDetailVisibility -Client $client -Config $config
+  if ($deviceDetailVisibility.status_code -ne 200) {
+    Add-Failure -Failures $failures -Code "device_detail_endpoint_failed"
+  }
+  if ($deviceDetailVisibility.cache_control -ne "no-store") {
+    Add-Failure -Failures $failures -Code "device_detail_endpoint_cache_control"
+  }
+  if ($deviceDetailVisibility.forbidden_matches.Count -gt 0) {
+    Add-Failure -Failures $failures -Code "device_detail_endpoint_forbidden_fields"
+  }
+
   $latestBefore = Get-LatestRun -Client $client -Config $config
   if ($latestBefore.forbidden_matches.Count -gt 0) {
     Add-Failure -Failures $failures -Code "latest_run_forbidden_fields"
@@ -331,6 +480,10 @@ try {
     $freshRun = Wait-ForFreshRun -Client $client -Config $config -PreviousReceivedAt $latestBefore.received_at -StartedAt $startedAt -TimeoutSeconds $WaitSeconds -IntervalSeconds $PollSeconds
     if (-not $freshRun.observed) {
       Add-Failure -Failures $failures -Code "fresh_hive_run_not_observed"
+    }
+    $freshNormalization = Wait-ForFreshNormalization -Client $client -Config $config -StartedAt $startedAt -TimeoutSeconds $WaitSeconds -IntervalSeconds $PollSeconds
+    if (-not $freshNormalization.observed) {
+      Add-Failure -Failures $failures -Code "fresh_normalization_not_observed"
     }
   } elseif ($Mode -eq "Scheduled") {
     $task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
@@ -351,6 +504,10 @@ try {
       if (-not $freshRun.observed) {
         Add-Failure -Failures $failures -Code "fresh_hive_run_not_observed"
       }
+      $freshNormalization = Wait-ForFreshNormalization -Client $client -Config $config -StartedAt $startedAt -TimeoutSeconds $WaitSeconds -IntervalSeconds $PollSeconds
+      if (-not $freshNormalization.observed) {
+        Add-Failure -Failures $failures -Code "fresh_normalization_not_observed"
+      }
     }
   } else {
     $task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
@@ -368,6 +525,34 @@ try {
     mode = $Mode
     checks = @($checks)
     admin_endpoints = @($adminResponses)
+    admin_assets = $adminAssets
+    route_posture = $routePosture
+    normalization_visibility = if ($null -ne $normalizationVisibility) {
+      [ordered]@{
+        status_code = $normalizationVisibility.status_code
+        cache_control = $normalizationVisibility.cache_control
+        total = $normalizationVisibility.total
+        returned = $normalizationVisibility.returned
+        complete_count = $normalizationVisibility.complete_count
+        error_count = $normalizationVisibility.error_count
+        promoted_count = $normalizationVisibility.promoted_count
+        forbidden_match_count = $normalizationVisibility.forbidden_matches.Count
+      }
+    } else {
+      $null
+    }
+    device_detail_visibility = if ($null -ne $deviceDetailVisibility) {
+      [ordered]@{
+        status_code = $deviceDetailVisibility.status_code
+        cache_control = $deviceDetailVisibility.cache_control
+        recent_normalization_count = $deviceDetailVisibility.recent_normalization_count
+        complete_count = $deviceDetailVisibility.complete_count
+        promoted_count = $deviceDetailVisibility.promoted_count
+        forbidden_match_count = $deviceDetailVisibility.forbidden_matches.Count
+      }
+    } else {
+      $null
+    }
     latest_run = [ordered]@{
       exists = $latestBefore.exists
       status = $latestBefore.status
@@ -392,6 +577,17 @@ try {
         status = if ($freshRun.latest) { $freshRun.latest.status } else { $null }
         received_at_present = if ($freshRun.latest) { $null -ne $freshRun.latest.received_at } else { $false }
         forbidden_match_count = if ($freshRun.latest) { $freshRun.latest.forbidden_matches.Count } else { 0 }
+      }
+    } else {
+      [ordered]@{ observed = $false; not_requested = $true }
+    }
+    fresh_normalization = if ($null -ne $freshNormalization) {
+      [ordered]@{
+        observed = $freshNormalization.observed
+        returned = if ($freshNormalization.latest) { $freshNormalization.latest.returned } else { 0 }
+        complete_count = if ($freshNormalization.latest) { $freshNormalization.latest.complete_count } else { 0 }
+        promoted_count = if ($freshNormalization.latest) { $freshNormalization.latest.promoted_count } else { 0 }
+        forbidden_match_count = if ($freshNormalization.latest) { $freshNormalization.latest.forbidden_matches.Count } else { 0 }
       }
     } else {
       [ordered]@{ observed = $false; not_requested = $true }

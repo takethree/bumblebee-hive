@@ -496,7 +496,8 @@ powershell -NoProfile -ExecutionPolicy Bypass `
   -InstallRoot "$env:LOCALAPPDATA\Programs\Bumblebee" `
   -ConfigRoot "$env:APPDATA\Bumblebee" `
   -TaskName "Bumblebee Baseline Pilot" `
-  -AdminSecretsPath ".local\deployment-secrets.clixml"
+  -AdminSecretsPath ".local\deployment-secrets.clixml" `
+  -WorkersDevUrl "https://bumblebee-hive.<account-subdomain>.workers.dev"
 ```
 
 Run the wrapper directly and wait for a fresh completed Hive run:
@@ -514,7 +515,8 @@ Trigger the scheduled task and wait for a fresh completed Hive run:
 powershell -NoProfile -ExecutionPolicy Bypass `
   -File .\scripts\verify-bumblebee-pilot.ps1 `
   -Mode Scheduled `
-  -WaitSeconds 240
+  -WaitSeconds 240 `
+  -WorkersDevUrl "https://bumblebee-hive.<account-subdomain>.workers.dev"
 ```
 
 A successful `CheckOnly` result proves:
@@ -522,14 +524,19 @@ A successful `CheckOnly` result proves:
 - local config, local DPAPI secrets, wrapper script, and binary are present;
 - `bumblebee.exe selftest` exits `0`;
 - the scheduled task exists and its last result is `0`;
-- Hive admin overview, device, and run metadata endpoints return `200`;
+- Hive admin overview, device, run, device-detail, and normalization-job
+  metadata endpoints return `200`;
 - admin responses use `Cache-Control: no-store`;
+- `/admin/` serves the dashboard shell and `/admin/app.js` contains the
+  normalization UI route;
+- when `-WorkersDevUrl` is supplied, the workers.dev route returns `404`;
 - forbidden raw-data fields are absent from admin responses.
 
 A successful `Direct` or `Scheduled` result additionally proves that a fresh
 `complete` run for the configured device/profile appeared in Hive after the
-trigger. The verifier uses the configured raw device ID only as an internal
-query filter and does not print it.
+trigger and that a fresh complete normalization job became visible for the same
+device. The verifier uses the configured raw device ID only as an internal query
+filter and does not print it.
 
 If verification fails:
 
@@ -544,3 +551,7 @@ If verification fails:
 - `fresh_hive_run_not_observed` means the local run completed but Hive did not
   expose a newer completed run before the timeout; check Access/HMAC ingest,
   Worker logs, and D1 run rows.
+- `fresh_normalization_not_observed` means ingest completed but the queue
+  consumer did not expose a fresh complete normalization job before the timeout;
+  check Worker queue delivery, consumer logs, and the `normalization_jobs` D1
+  rows.

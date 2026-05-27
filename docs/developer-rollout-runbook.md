@@ -106,13 +106,17 @@ powershell -NoProfile -ExecutionPolicy Bypass `
   -InstallRoot "$env:LOCALAPPDATA\Programs\Bumblebee" `
   -ConfigRoot "$env:APPDATA\Bumblebee" `
   -TaskName "Bumblebee Baseline Pilot" `
-  -AdminSecretsPath ".local\deployment-secrets.clixml"
+  -AdminSecretsPath ".local\deployment-secrets.clixml" `
+  -WorkersDevUrl "https://bumblebee-hive.<account-subdomain>.workers.dev"
 ```
 
 `CheckOnly` validates local config, local DPAPI secret material, wrapper script,
 configured binary, device ID presence, `/v1/ingest` target shape, scan profile,
-`bumblebee.exe selftest`, scheduled-task presence, last task result, and Hive
-admin metadata reachability. It emits redacted JSON and does not send inventory.
+`bumblebee.exe selftest`, scheduled-task presence, last task result, Hive admin
+metadata reachability, dashboard asset availability, normalization-job
+visibility, device-detail recent normalization visibility, and optional
+workers.dev disabled posture. It emits redacted JSON and does not send
+inventory.
 
 ## Verify A Fresh Run
 
@@ -127,7 +131,8 @@ powershell -NoProfile -ExecutionPolicy Bypass `
   -ConfigRoot "$env:APPDATA\Bumblebee" `
   -TaskName "Bumblebee Baseline Pilot" `
   -AdminSecretsPath ".local\deployment-secrets.clixml" `
-  -WaitSeconds 240
+  -WaitSeconds 240 `
+  -WorkersDevUrl "https://bumblebee-hive.<account-subdomain>.workers.dev"
 ```
 
 Use `Scheduled` for pilot proof. Use `Direct` only when troubleshooting the
@@ -142,7 +147,11 @@ Record only redacted evidence:
 - installer completed on the selected host;
 - `CheckOnly` returned `ok: true`;
 - if run, `Scheduled` observed a fresh `complete` Hive run;
+- if run, `Scheduled` observed a fresh complete normalization job;
 - admin metadata responses had zero forbidden field matches;
+- `/admin/` and `/admin/app.js` were reachable and contained the normalization
+  UI marker;
+- if checked, the workers.dev route returned `404`;
 - no live token values, raw device IDs, hostnames, usernames, SIDs, profile
   paths, raw payloads, or raw inventory were captured.
 
