@@ -7,3 +7,4 @@ coverage/
 *.local
 .local/
 wrangler.deploy.toml
+docs/goals/**/.goalbuddy-board/

@@ -138,6 +138,75 @@
 
       <section class="panel">
         <div class="panel-header">
+          <h2>Findings</h2>
+          <div class="filters">
+            <label>
+              Rows
+              <select id="findings-page-size">
+                <option value="10">10</option>
+                <option value="25">25</option>
+                <option value="50">50</option>
+                <option value="100">100</option>
+              </select>
+            </label>
+            <label>
+              Severity
+              <input id="finding-severity" type="text" placeholder="critical">
+            </label>
+            <label>
+              Catalog
+              <input id="finding-catalog" type="text" placeholder="advisory id">
+            </label>
+            <label>
+              Search
+              <input id="finding-query" type="search" placeholder="package name">
+            </label>
+            <label>
+              Ecosystem
+              <input id="finding-ecosystem" type="text" placeholder="npm">
+            </label>
+            <label>
+              Profile
+              <input id="finding-profile" type="text" placeholder="baseline">
+            </label>
+            <label>
+              Device
+              <input id="finding-device" type="text" placeholder="device id">
+            </label>
+            <label>
+              Run
+              <input id="finding-run" type="text" placeholder="run id">
+            </label>
+          </div>
+        </div>
+        <div class="health-summary" aria-label="Findings summary">
+          <span>Total <strong id="findings-total">-</strong></span>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Severity</th>
+                <th>Catalog</th>
+                <th>Package</th>
+                <th>Device</th>
+                <th>Profile</th>
+                <th>Run</th>
+                <th>Source</th>
+                <th>Evidence</th>
+                <th>Observed</th>
+              </tr>
+            </thead>
+            <tbody id="findings-body">
+              <tr><td colspan="9">Loading findings...</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <nav id="findings-pagination" class="pagination" aria-label="Findings pages"></nav>
+      </section>
+
+      <section class="panel">
+        <div class="panel-header">
           <h2>Devices</h2>
           <div class="filters">
             <label>

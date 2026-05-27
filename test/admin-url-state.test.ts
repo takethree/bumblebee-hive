@@ -65,7 +65,7 @@ function makeHarness(initialURL: string): {
   element("normalization-status").options = [{ value: "" }, { value: "processing" }, { value: "complete" }, { value: "error" }];
   element("normalization-promoted").value = "";
   element("normalization-promoted").options = [{ value: "" }, { value: "true" }, { value: "false" }];
-  for (const id of ["device-page-size", "attention-page-size", "run-page-size", "inventory-page-size", "detail-inventory-page-size", "normalization-page-size"]) {
+  for (const id of ["device-page-size", "attention-page-size", "findings-page-size", "run-page-size", "inventory-page-size", "detail-inventory-page-size", "normalization-page-size"]) {
     element(id).value = "10";
     element(id).options = [{ value: "10" }, { value: "25" }, { value: "50" }, { value: "100" }];
   }
@@ -110,6 +110,9 @@ function makeHarness(initialURL: string): {
           }
           if (pathname.includes("/attention")) {
             return { counts: { total: 0, critical: 0, warning: 0, reasons: {} }, attention: [], ...pageMeta };
+          }
+          if (pathname.includes("/findings")) {
+            return { counts: { total: 0, severities: {} }, findings: [], ...pageMeta };
           }
           if (pathname.includes("/runs")) {
             return { runs: [], ...pageMeta };
@@ -195,12 +198,19 @@ async function loadAdminApp(harness: ReturnType<typeof makeHarness>): Promise<Re
 
 describe("admin URL state", () => {
   it("hydrates device and filters from path plus query parameters", async () => {
-    const harness = makeHarness("https://hive.example.test/admin/devices/device-1?device_status=all&attention_severity=critical&attention_reason=normalization_error&inventory_view=summary&package_query=left&ecosystem=npm&profile=baseline&selected_package=left-pad&selected_ecosystem=npm&selected_profile=baseline&selected_device=device-1&run_status=complete&run_profile=project&normalization_status=error&normalization_promoted=false&normalization_device=device-1&normalization_run=run-1");
+    const harness = makeHarness("https://hive.example.test/admin/devices/device-1?device_status=all&attention_severity=critical&attention_reason=normalization_error&finding_severity=critical&finding_catalog=advisory-1&finding_query=left&finding_ecosystem=npm&finding_profile=baseline&finding_device=device-1&finding_run=run-1&inventory_view=summary&package_query=left&ecosystem=npm&profile=baseline&selected_package=left-pad&selected_ecosystem=npm&selected_profile=baseline&selected_device=device-1&run_status=complete&run_profile=project&normalization_status=error&normalization_promoted=false&normalization_device=device-1&normalization_run=run-1");
     const admin = await loadAdminApp(harness);
 
     expect(harness.elements.get("device-status")?.value).toBe("all");
     expect(harness.elements.get("attention-severity")?.value).toBe("critical");
     expect(harness.elements.get("attention-reason")?.value).toBe("normalization_error");
+    expect(harness.elements.get("finding-severity")?.value).toBe("critical");
+    expect(harness.elements.get("finding-catalog")?.value).toBe("advisory-1");
+    expect(harness.elements.get("finding-query")?.value).toBe("left");
+    expect(harness.elements.get("finding-ecosystem")?.value).toBe("npm");
+    expect(harness.elements.get("finding-profile")?.value).toBe("baseline");
+    expect(harness.elements.get("finding-device")?.value).toBe("device-1");
+    expect(harness.elements.get("finding-run")?.value).toBe("run-1");
     expect(harness.elements.get("package-query")?.value).toBe("left");
     expect(harness.elements.get("package-ecosystem")?.value).toBe("npm");
     expect(harness.elements.get("package-profile")?.value).toBe("baseline");
@@ -211,7 +221,7 @@ describe("admin URL state", () => {
     expect(harness.elements.get("normalization-device")?.value).toBe("device-1");
     expect(harness.elements.get("normalization-run")?.value).toBe("run-1");
     expect(harness.packageViewInputs.find((input) => input.value === "summary")?.checked).toBe(true);
-    expect(admin.currentAdminPath()).toBe("/admin/devices/device-1?device_status=all&attention_severity=critical&attention_reason=normalization_error&inventory_view=summary&package_query=left&ecosystem=npm&profile=baseline&selected_package=left-pad&selected_ecosystem=npm&selected_profile=baseline&selected_device=device-1&run_status=complete&run_profile=project&normalization_status=error&normalization_promoted=false&normalization_device=device-1&normalization_run=run-1");
+    expect(admin.currentAdminPath()).toBe("/admin/devices/device-1?device_status=all&attention_severity=critical&attention_reason=normalization_error&finding_severity=critical&finding_catalog=advisory-1&finding_query=left&finding_ecosystem=npm&finding_profile=baseline&finding_device=device-1&finding_run=run-1&inventory_view=summary&package_query=left&ecosystem=npm&profile=baseline&selected_package=left-pad&selected_ecosystem=npm&selected_profile=baseline&selected_device=device-1&run_status=complete&run_profile=project&normalization_status=error&normalization_promoted=false&normalization_device=device-1&normalization_run=run-1");
   });
 
   it("pushes device paths, clears to dashboard, and restores Back/Forward state", async () => {
@@ -237,19 +247,20 @@ describe("admin URL state", () => {
   });
 
   it("hydrates pagination params and pushes page changes into the URL", async () => {
-    const harness = makeHarness("https://hive.example.test/admin/devices/device-1?page_size=25&inventory_view=package&device_page=2&attention_page=7&inventory_page=3&run_page=4&detail_inventory_page=5&normalization_page=6");
+    const harness = makeHarness("https://hive.example.test/admin/devices/device-1?page_size=25&inventory_view=package&device_page=2&attention_page=7&findings_page=8&inventory_page=3&run_page=4&detail_inventory_page=5&normalization_page=6");
     const admin = await loadAdminApp(harness);
 
     expect(harness.elements.get("device-page-size")?.value).toBe("25");
     expect(harness.elements.get("attention-page-size")?.value).toBe("25");
+    expect(harness.elements.get("findings-page-size")?.value).toBe("25");
     expect(harness.elements.get("run-page-size")?.value).toBe("25");
     expect(harness.elements.get("inventory-page-size")?.value).toBe("25");
     expect(harness.elements.get("detail-inventory-page-size")?.value).toBe("25");
     expect(harness.elements.get("normalization-page-size")?.value).toBe("25");
-    expect(admin.currentAdminPath()).toBe("/admin/devices/device-1?device_page_size=25&device_page=2&attention_page_size=25&attention_page=7&inventory_view=package&inventory_page_size=25&inventory_page=3&run_page_size=25&run_page=4&normalization_page_size=25&normalization_page=6&detail_inventory_page_size=25&detail_inventory_page=5");
+    expect(admin.currentAdminPath()).toBe("/admin/devices/device-1?device_page_size=25&device_page=2&attention_page_size=25&attention_page=7&findings_page_size=25&findings_page=8&inventory_view=package&inventory_page_size=25&inventory_page=3&run_page_size=25&run_page=4&normalization_page_size=25&normalization_page=6&detail_inventory_page_size=25&detail_inventory_page=5");
 
     await admin.setPage("inventoryPage", 6, async () => undefined);
-    expect(harness.pushes.at(-1)).toBe("/admin/devices/device-1?device_page_size=25&device_page=2&attention_page_size=25&attention_page=7&inventory_view=package&inventory_page_size=25&inventory_page=6&run_page_size=25&run_page=4&normalization_page_size=25&normalization_page=6&detail_inventory_page_size=25&detail_inventory_page=5");
+    expect(harness.pushes.at(-1)).toBe("/admin/devices/device-1?device_page_size=25&device_page=2&attention_page_size=25&attention_page=7&findings_page_size=25&findings_page=8&inventory_view=package&inventory_page_size=25&inventory_page=6&run_page_size=25&run_page=4&normalization_page_size=25&normalization_page=6&detail_inventory_page_size=25&detail_inventory_page=5");
   });
 
   it("resets relevant page state when filters change", async () => {
@@ -264,13 +275,17 @@ describe("admin URL state", () => {
     harness.elements.get("attention-severity")!.listeners.get("change")?.({} as Event);
     expect(admin.currentAdminPath()).toBe("/admin/?device_page=2&attention_severity=critical&inventory_view=summary&package_query=needle&run_page=3");
 
+    harness.elements.get("finding-severity")!.value = "critical";
+    harness.elements.get("finding-severity")!.listeners.get("input")?.({} as Event);
+    expect(admin.currentAdminPath()).toBe("/admin/?device_page=2&attention_severity=critical&finding_severity=critical&inventory_view=summary&package_query=needle&run_page=3");
+
     harness.elements.get("run-status")!.value = "complete";
     harness.elements.get("run-status")!.listeners.get("change")?.({} as Event);
-    expect(admin.currentAdminPath()).toBe("/admin/?device_page=2&attention_severity=critical&inventory_view=summary&package_query=needle&run_status=complete");
+    expect(admin.currentAdminPath()).toBe("/admin/?device_page=2&attention_severity=critical&finding_severity=critical&inventory_view=summary&package_query=needle&run_status=complete");
 
     harness.elements.get("normalization-status")!.value = "error";
     harness.elements.get("normalization-status")!.listeners.get("change")?.({} as Event);
-    expect(admin.currentAdminPath()).toBe("/admin/?device_page=2&attention_severity=critical&inventory_view=summary&package_query=needle&run_status=complete&normalization_status=error");
+    expect(admin.currentAdminPath()).toBe("/admin/?device_page=2&attention_severity=critical&finding_severity=critical&inventory_view=summary&package_query=needle&run_status=complete&normalization_status=error");
   });
 
   it("defaults to ten rows and resets only the target list when page size changes", async () => {

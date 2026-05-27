@@ -237,6 +237,24 @@ function Get-AttentionVisibility {
   }
 }
 
+function Get-FindingsVisibility {
+  param(
+    [System.Net.Http.HttpClient]$Client,
+    [object]$Config
+  )
+  $response = Invoke-HiveAdmin -Client $Client -HiveBaseUrl ([string]$Config.hive_base_url) -Path "/v1/admin/findings?limit=5&offset=0"
+  $findings = @(Get-JsonProperty -Object $response.body -Name "findings")
+  $counts = Get-JsonProperty -Object $response.body -Name "counts"
+  [pscustomobject]@{
+    status_code = $response.status_code
+    cache_control = $response.cache_control
+    forbidden_matches = @(Test-ForbiddenFields -Body $response.body_text)
+    total = if ($null -ne (Get-JsonProperty -Object $response.body -Name "total")) { [int](Get-JsonProperty -Object $response.body -Name "total") } else { 0 }
+    returned = $findings.Count
+    count_total = if ($null -ne (Get-JsonProperty -Object $counts -Name "total")) { [int](Get-JsonProperty -Object $counts -Name "total") } else { 0 }
+  }
+}
+
 function Get-DeviceDetailVisibility {
   param(
     [System.Net.Http.HttpClient]$Client,
@@ -339,6 +357,7 @@ $config = $null
 $adminAssets = $null
 $routePosture = $null
 $attentionVisibility = $null
+$findingsVisibility = $null
 $normalizationVisibility = $null
 $deviceDetailVisibility = $null
 $freshNormalization = $null
@@ -400,7 +419,7 @@ try {
 
   $client = New-HiveClient -AdminSecrets $adminSecrets
   $adminResponses = @()
-  foreach ($adminPath in @("/v1/admin/overview", "/v1/admin/attention?limit=5&offset=0", "/v1/admin/devices?status=all&limit=5&offset=0", "/v1/admin/runs?limit=5&offset=0")) {
+  foreach ($adminPath in @("/v1/admin/overview", "/v1/admin/attention?limit=5&offset=0", "/v1/admin/findings?limit=5&offset=0", "/v1/admin/devices?status=all&limit=5&offset=0", "/v1/admin/runs?limit=5&offset=0")) {
     $response = Invoke-HiveAdmin -Client $client -HiveBaseUrl ([string]$config.hive_base_url) -Path $adminPath
     $matches = @(Test-ForbiddenFields -Body $response.body_text)
     $adminResponses += [pscustomobject]@{
@@ -428,6 +447,8 @@ try {
     script_status_code = $adminScript.status_code
     script_has_attention_route = $adminScript.body_text -like "*/v1/ui/admin/attention*"
     script_has_attention_loader = $adminScript.body_text -like "*loadAttention*"
+    script_has_findings_route = $adminScript.body_text -like "*/v1/ui/admin/findings*"
+    script_has_findings_loader = $adminScript.body_text -like "*loadFindings*"
     script_has_normalization_route = $adminScript.body_text -like "*/v1/ui/admin/normalization-jobs*"
     script_has_normalization_loader = $adminScript.body_text -like "*loadNormalizationJobs*"
   }
@@ -436,6 +457,9 @@ try {
   }
   if ($adminAssets.script_status_code -ne 200 -or -not $adminAssets.script_has_attention_route -or -not $adminAssets.script_has_attention_loader) {
     Add-Failure -Failures $failures -Code "admin_script_attention_missing"
+  }
+  if ($adminAssets.script_status_code -ne 200 -or -not $adminAssets.script_has_findings_route -or -not $adminAssets.script_has_findings_loader) {
+    Add-Failure -Failures $failures -Code "admin_script_findings_missing"
   }
   if ($adminAssets.script_status_code -ne 200 -or -not $adminAssets.script_has_normalization_route -or -not $adminAssets.script_has_normalization_loader) {
     Add-Failure -Failures $failures -Code "admin_script_normalization_missing"
@@ -477,6 +501,17 @@ try {
   }
   if ($attentionVisibility.forbidden_matches.Count -gt 0) {
     Add-Failure -Failures $failures -Code "attention_endpoint_forbidden_fields"
+  }
+
+  $findingsVisibility = Get-FindingsVisibility -Client $client -Config $config
+  if ($findingsVisibility.status_code -ne 200) {
+    Add-Failure -Failures $failures -Code "findings_endpoint_failed"
+  }
+  if ($findingsVisibility.cache_control -ne "no-store") {
+    Add-Failure -Failures $failures -Code "findings_endpoint_cache_control"
+  }
+  if ($findingsVisibility.forbidden_matches.Count -gt 0) {
+    Add-Failure -Failures $failures -Code "findings_endpoint_forbidden_fields"
   }
 
   $normalizationVisibility = Get-NormalizationVisibility -Client $client -Config $config
@@ -574,6 +609,18 @@ try {
         critical_count = $attentionVisibility.critical_count
         warning_count = $attentionVisibility.warning_count
         forbidden_match_count = $attentionVisibility.forbidden_matches.Count
+      }
+    } else {
+      $null
+    }
+    findings_visibility = if ($null -ne $findingsVisibility) {
+      [ordered]@{
+        status_code = $findingsVisibility.status_code
+        cache_control = $findingsVisibility.cache_control
+        total = $findingsVisibility.total
+        returned = $findingsVisibility.returned
+        count_total = $findingsVisibility.count_total
+        forbidden_match_count = $findingsVisibility.forbidden_matches.Count
       }
     } else {
       $null

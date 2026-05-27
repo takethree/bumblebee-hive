@@ -117,6 +117,9 @@ class MemoryStmt {
     if (this.sql.startsWith("SELECT COUNT(*) AS total FROM normalization_jobs")) {
       return { total: this.filteredNormalizationJobRows().length } as T;
     }
+    if (this.sql.startsWith("SELECT COUNT(*) AS total FROM exposure_findings")) {
+      return { total: this.filteredFindingRows().length } as T;
+    }
     if (this.sql.startsWith("SELECT COUNT(*) AS total") && this.sql.includes("FROM inventory_current")) {
       const rows = this.filteredCurrentRows();
       if (this.sql.includes("GROUP BY device_id, profile, ecosystem, normalized_name, version")) {
@@ -187,6 +190,18 @@ class MemoryStmt {
     }
     if (this.sql.includes("FROM normalization_jobs")) {
       return { results: this.page(this.filteredNormalizationJobRows()) as T[] };
+    }
+    if (this.sql.includes("FROM exposure_findings")) {
+      const rows = this.filteredFindingRows();
+      if (this.sql.includes("GROUP BY COALESCE(severity")) {
+        const counts = new Map<string, number>();
+        for (const row of rows) {
+          const key = row.severity || "";
+          counts.set(key, (counts.get(key) || 0) + 1);
+        }
+        return { results: [...counts.entries()].map(([value, total]) => ({ value, total })) as T[] };
+      }
+      return { results: this.page(rows) as T[] };
     }
     if (this.sql.includes("FROM runs r")) {
       let rows = this.db.adminRunRows();
@@ -444,6 +459,44 @@ class MemoryStmt {
     if (this.sql.includes("promoted_current = ?")) {
       const promotedCurrent = Number(this.values[valueIndex++]);
       rows = rows.filter((row) => row.promoted_current === promotedCurrent);
+    }
+    return rows;
+  }
+
+  private filteredFindingRows(): ReturnType<MemoryD1["findingRows"]> {
+    let rows = this.db.findingRows();
+    let valueIndex = 0;
+    if (this.sql.includes("device_id = ?")) {
+      const deviceID = String(this.values[valueIndex++]);
+      rows = rows.filter((row) => row.device_id === deviceID);
+    }
+    if (this.sql.includes("severity = ?")) {
+      const severity = String(this.values[valueIndex++]);
+      rows = rows.filter((row) => row.severity === severity);
+    }
+    if (this.sql.includes("catalog_id = ?")) {
+      const catalogID = String(this.values[valueIndex++]);
+      rows = rows.filter((row) => row.catalog_id === catalogID);
+    }
+    if (this.sql.includes("ecosystem = ?")) {
+      const ecosystem = String(this.values[valueIndex++]);
+      rows = rows.filter((row) => row.ecosystem === ecosystem);
+    }
+    if (this.sql.includes("profile = ?")) {
+      const profile = String(this.values[valueIndex++]);
+      rows = rows.filter((row) => row.profile === profile);
+    }
+    if (this.sql.includes("run_id = ?")) {
+      const runID = String(this.values[valueIndex++]);
+      rows = rows.filter((row) => row.run_id === runID);
+    }
+    if (this.sql.includes("normalized_name LIKE ?")) {
+      const query = String(this.values[valueIndex++]).replace(/^%|%$/g, "").toLowerCase();
+      valueIndex++;
+      rows = rows.filter((row) =>
+        row.normalized_name.toLowerCase().includes(query) ||
+        row.package_name.toLowerCase().includes(query)
+      );
     }
     return rows;
   }
@@ -927,6 +980,48 @@ class MemoryD1 {
       completed_at: job[10] === null || job[10] === undefined ? null : String(job[10])
     }));
   }
+
+  findingRows(): Array<{
+    device_id: string;
+    run_id: string;
+    record_id: string;
+    profile: string;
+    finding_type: string;
+    severity: string | null;
+    catalog_id: string;
+    catalog_name: string | null;
+    ecosystem: string;
+    package_name: string;
+    normalized_name: string;
+    version: string | null;
+    root_kind: string | null;
+    source_type: string | null;
+    confidence: string | null;
+    evidence: string | null;
+    batch_id: string;
+    received_at: string;
+  }> {
+    return [...this.exposureFindings.values()].map((row) => ({
+      device_id: String(row[0]),
+      run_id: String(row[1]),
+      record_id: String(row[2]),
+      profile: String(row[3]),
+      finding_type: String(row[4]),
+      severity: row[5] === null || row[5] === undefined ? null : String(row[5]),
+      catalog_id: String(row[6]),
+      catalog_name: row[7] === null || row[7] === undefined ? null : String(row[7]),
+      ecosystem: String(row[8]),
+      package_name: String(row[9]),
+      normalized_name: String(row[10]),
+      version: row[11] === null || row[11] === undefined ? null : String(row[11]),
+      root_kind: row[12] === null || row[12] === undefined ? null : String(row[12]),
+      source_type: row[13] === null || row[13] === undefined ? null : String(row[13]),
+      confidence: row[14] === null || row[14] === undefined ? null : String(row[14]),
+      evidence: row[15] === null || row[15] === undefined ? null : String(row[15]),
+      batch_id: String(row[16]),
+      received_at: String(row[17])
+    }));
+  }
 }
 
 function base64url(bytes: Uint8Array): string {
@@ -1097,7 +1192,7 @@ function packageRecord(runID: string, deviceID: string, name = "left-pad", versi
   };
 }
 
-function findingRecord(runID: string, deviceID: string, profile = "baseline"): object {
+function findingRecord(runID: string, deviceID: string, profile = "baseline", overrides: Record<string, unknown> = {}): object {
   return {
     record_type: "finding",
     record_id: `finding:${profile}:left-pad:1.3.0:advisory-1`,
@@ -1120,7 +1215,8 @@ function findingRecord(runID: string, deviceID: string, profile = "baseline"): o
     source_type: "package-lock",
     source_file: "redacted-by-api",
     confidence: "high",
-    evidence: "exact test match"
+    evidence: "exact test match",
+    ...overrides
   };
 }
 
@@ -1254,6 +1350,109 @@ describe("bumblebee hive worker", () => {
     expect(packageBody.packages[0].source_file).toBeUndefined();
     expect(packageBody.packages[0].project_path).toBeUndefined();
     expect(forbiddenVisibilityFields(packageBody)).toEqual([]);
+  });
+
+  it("returns metadata-only exposure findings through admin and UI routes", async () => {
+    const env = makeEnv();
+    const hmacKey = "device-secret";
+    await addDevice(env, "device-1", hmacKey);
+    await addDevice(env, "device-2", hmacKey);
+    const deviceOneNDJSON = [
+      JSON.stringify(packageRecord("run-1", "device-1")),
+      JSON.stringify(findingRecord("run-1", "device-1", "baseline", {
+        evidence: "found in C:\\Users\\operator\\repo\\package-lock.json"
+      })),
+      JSON.stringify(summaryRecord("run-1", "device-1"))
+    ].join("\n") + "\n";
+    const deviceTwoNDJSON = [
+      JSON.stringify(packageRecord("run-2", "device-2", "right-pad", "9.9.9")),
+      JSON.stringify(findingRecord("run-2", "device-2", "baseline", {
+        record_id: "finding:baseline:right-pad:9.9.9:advisory-2",
+        severity: "high",
+        catalog_id: "advisory-2",
+        catalog_name: "right-pad test advisory",
+        package_name: "right-pad",
+        normalized_name: "right-pad",
+        version: "9.9.9",
+        evidence: "found in /home/operator/repo/package-lock.json"
+      })),
+      JSON.stringify(summaryRecord("run-2", "device-2"))
+    ].join("\n") + "\n";
+
+    const deviceOneResponse = await worker.fetch(await signedRequest(env, gzipSync(deviceOneNDJSON), hmacKey, {
+      "X-Inventory-Device-Id": "device-1"
+    }), env);
+    const deviceTwoResponse = await worker.fetch(await signedRequest(env, gzipSync(deviceTwoNDJSON), hmacKey, {
+      "X-Inventory-Device-Id": "device-2"
+    }), env);
+    expect(deviceOneResponse.status).toBe(200);
+    expect(deviceTwoResponse.status).toBe(200);
+    await testInternals.normalizeQueuedBatch(env, env.NORMALIZE_QUEUE.messages[0] as { device_id: string; run_id: string; batch_id: string });
+    await testInternals.normalizeQueuedBatch(env, env.NORMALIZE_QUEUE.messages[1] as { device_id: string; run_id: string; batch_id: string });
+
+    const adminResponse = await worker.fetch(new Request("https://hive.example.test/v1/admin/findings?severity=critical&catalog_id=advisory-1&ecosystem=npm&query=left&device_id=device-1&profile=baseline&run_id=run-1&limit=1&offset=0", {
+      headers: adminHeaders(env)
+    }), env);
+    const adminBody = await adminResponse.json() as {
+      counts: { total: number; severities: Record<string, number> };
+      findings: Array<Record<string, unknown>>;
+      total: number;
+      limit: number;
+      offset: number;
+    };
+
+    expect(adminResponse.status).toBe(200);
+    expect(adminResponse.headers.get("Cache-Control")).toBe("no-store");
+    expect(adminBody).toMatchObject({
+      counts: { total: 1, severities: { critical: 1 } },
+      total: 1,
+      limit: 1,
+      offset: 0
+    });
+    expect(adminBody.findings).toHaveLength(1);
+    expect(adminBody.findings[0]).toEqual(expect.objectContaining({
+      device_id: "device-1",
+      run_id: "run-1",
+      record_id: "finding:baseline:left-pad:1.3.0:advisory-1",
+      profile: "baseline",
+      finding_type: "package_exposure",
+      severity: "critical",
+      catalog_id: "advisory-1",
+      catalog_name: "left-pad test advisory",
+      ecosystem: "npm",
+      package_name: "left-pad",
+      normalized_name: "left-pad",
+      version: "1.3.0",
+      root_kind: "project_root",
+      source_type: "package-lock",
+      confidence: "high",
+      evidence: "found in [redacted-path]"
+    }));
+    expect(adminBody.findings[0].batch_id).toBeUndefined();
+    expect(adminBody.findings[0].source_file).toBeUndefined();
+    expect(adminBody.findings[0].project_path).toBeUndefined();
+    expect(adminBody.findings[0].summary_json).toBeUndefined();
+    expect(forbiddenVisibilityFields(adminBody)).toEqual([]);
+
+    const token = await accessJWT(env);
+    const uiResponse = await worker.fetch(new Request("https://hive.example.test/v1/ui/admin/findings?catalog_id=advisory-2&limit=10&offset=0", {
+      headers: { "Cf-Access-Jwt-Assertion": token }
+    }), env);
+    const uiBody = await uiResponse.json() as { counts: { total: number }; findings: Array<{ normalized_name: string; evidence: string }> };
+    expect(uiResponse.status).toBe(200);
+    expect(uiResponse.headers.get("Cache-Control")).toBe("no-store");
+    expect(uiBody.counts.total).toBe(1);
+    expect(uiBody.findings).toEqual([expect.objectContaining({
+      normalized_name: "right-pad",
+      evidence: "found in [redacted-path]"
+    })]);
+    expect(forbiddenVisibilityFields(uiBody)).toEqual([]);
+
+    const invalid = await worker.fetch(new Request("https://hive.example.test/v1/admin/findings?severity=critical%20bad", {
+      headers: adminHeaders(env)
+    }), env);
+    expect(invalid.status).toBe(400);
+    expect(await invalid.json()).toEqual({ error: "invalid_severity" });
   });
 
   it("defaults package inventory to deduped summaries and keeps explicit observations available", async () => {

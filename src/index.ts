@@ -142,6 +142,26 @@ interface AdminNormalizationJobRow {
   completed_at: string | null;
 }
 
+interface AdminFindingRow {
+  device_id: string;
+  run_id: string;
+  record_id: string;
+  profile: string;
+  finding_type: string;
+  severity: string | null;
+  catalog_id: string;
+  catalog_name: string | null;
+  ecosystem: string;
+  package_name: string;
+  normalized_name: string;
+  version: string | null;
+  root_kind: string | null;
+  source_type: string | null;
+  confidence: string | null;
+  evidence: string | null;
+  received_at: string;
+}
+
 interface RetentionBatchRow {
   batch_id: string;
   object_key: string;
@@ -294,6 +314,11 @@ interface CountRow {
   total: number;
 }
 
+interface CountByValueRow {
+  value: string | null;
+  total: number;
+}
+
 interface ValidatedRecords {
   runID: string;
   summary: InventoryRecord | null;
@@ -403,6 +428,12 @@ export default {
       }
       if (request.method === "GET" && url.pathname === "/v1/ui/admin/normalization-jobs") {
         return await uiAdminNormalizationJobs(request, env, url);
+      }
+      if (request.method === "GET" && url.pathname === "/v1/admin/findings") {
+        return await adminFindings(request, env, url);
+      }
+      if (request.method === "GET" && url.pathname === "/v1/ui/admin/findings") {
+        return await uiAdminFindings(request, env, url);
       }
       if (request.method === "GET" && url.pathname === "/v1/admin/packages/detail") {
         return await adminPackageDetail(request, env, url);
@@ -1215,6 +1246,16 @@ async function uiAdminNormalizationJobs(request: Request, env: Env, url: URL): P
   return adminJson(await adminNormalizationJobsData(env, url));
 }
 
+async function adminFindings(request: Request, env: Env, url: URL): Promise<Response> {
+  requireAdminRequest(request, env);
+  return adminJson(await adminFindingsData(env, url));
+}
+
+async function uiAdminFindings(request: Request, env: Env, url: URL): Promise<Response> {
+  await requireUIAdminRequest(request, env);
+  return adminJson(await adminFindingsData(env, url));
+}
+
 async function adminNormalizationJobsData(env: Env, url: URL): Promise<object> {
   const where: string[] = [];
   const values: (string | number)[] = [];
@@ -1264,6 +1305,65 @@ async function adminNormalizationJobsData(env: Env, url: URL): Promise<object> {
       device_id: deviceID ? sanitizeDeviceID(deviceID) : null,
       run_id: runID || null,
       promoted_current: promotedCurrent || null
+    }
+  };
+}
+
+async function adminFindingsData(env: Env, url: URL): Promise<object> {
+  const where: string[] = [];
+  const values: (string | number)[] = [];
+  const deviceID = url.searchParams.get("device_id");
+  if (deviceID) {
+    const sanitized = sanitizeDeviceID(deviceID);
+    if (!sanitized) {
+      throw new HttpError(400, "invalid_device_id");
+    }
+    where.push("device_id = ?");
+    values.push(sanitized);
+  }
+  for (const param of ["severity", "catalog_id", "ecosystem", "profile", "run_id"] as const) {
+    const value = textField(url.searchParams.get(param) || "");
+    if (!value) {
+      continue;
+    }
+    if (!isSafeFilterToken(value)) {
+      throw new HttpError(400, `invalid_${param}`);
+    }
+    where.push(`${param} = ?`);
+    values.push(value);
+  }
+  const query = (url.searchParams.get("query") || "").trim();
+  if (query) {
+    where.push("(normalized_name LIKE ? ESCAPE '\\' OR package_name LIKE ? ESCAPE '\\')");
+    const like = `%${query.replace(/[%_]/g, "\\$&")}%`;
+    values.push(like, like);
+  }
+  const limit = boundedIntParam(url.searchParams, "limit", 10, 100);
+  const offset = boundedIntParam(url.searchParams, "offset", 0, 100000);
+  const whereSQL = where.length ? `WHERE ${where.join(" AND ")}` : "";
+  const count = await env.DB.prepare(`SELECT COUNT(*) AS total FROM exposure_findings ${whereSQL}`).bind(...values).first<CountRow>();
+  const severityRows = await allRows<CountByValueRow>(
+    env.DB.prepare(`SELECT COALESCE(severity, '') AS value, COUNT(*) AS total FROM exposure_findings ${whereSQL} GROUP BY COALESCE(severity, '')`).bind(...values)
+  );
+  const rows = await allRows<AdminFindingRow>(
+    env.DB.prepare(`${adminFindingSelect()} ${whereSQL} ORDER BY received_at DESC, device_id ASC, catalog_id ASC, normalized_name ASC LIMIT ? OFFSET ?`).bind(...values, limit, offset)
+  );
+
+  return {
+    counts: {
+      total: count?.total || 0,
+      severities: Object.fromEntries(severityRows.map((row) => [row.value || "unspecified", row.total || 0]))
+    },
+    findings: rows.map(formatFindingRow),
+    ...paginationMeta(count?.total || 0, limit, offset),
+    filters: {
+      severity: textField(url.searchParams.get("severity") || "") || null,
+      catalog_id: textField(url.searchParams.get("catalog_id") || "") || null,
+      ecosystem: textField(url.searchParams.get("ecosystem") || "") || null,
+      query: query || null,
+      device_id: deviceID ? sanitizeDeviceID(deviceID) : null,
+      profile: textField(url.searchParams.get("profile") || "") || null,
+      run_id: textField(url.searchParams.get("run_id") || "") || null
     }
   };
 }
@@ -1512,6 +1612,28 @@ function adminNormalizationJobSelect(): string {
     started_at,
     completed_at
   FROM normalization_jobs`;
+}
+
+function adminFindingSelect(): string {
+  return `SELECT
+    device_id,
+    run_id,
+    record_id,
+    profile,
+    finding_type,
+    severity,
+    catalog_id,
+    catalog_name,
+    ecosystem,
+    package_name,
+    normalized_name,
+    version,
+    root_kind,
+    source_type,
+    confidence,
+    evidence,
+    received_at
+  FROM exposure_findings`;
 }
 
 function adminPackageSelect(): string {
@@ -1942,14 +2064,50 @@ function formatNormalizationJobRow(row: AdminNormalizationJobRow): object {
   };
 }
 
+function formatFindingRow(row: AdminFindingRow): object {
+  return {
+    device_id: row.device_id,
+    run_id: row.run_id,
+    record_id: row.record_id,
+    profile: row.profile,
+    finding_type: row.finding_type,
+    severity: row.severity,
+    catalog_id: row.catalog_id,
+    catalog_name: row.catalog_name,
+    ecosystem: row.ecosystem,
+    package_name: row.package_name,
+    normalized_name: row.normalized_name,
+    version: row.version,
+    root_kind: row.root_kind,
+    source_type: row.source_type,
+    confidence: row.confidence,
+    evidence: safeFindingEvidence(row.evidence),
+    received_at: row.received_at
+  };
+}
+
 function safeNormalizationError(error: string | null): string | null {
   if (!error) {
     return null;
   }
   return error
+    .replace(/[A-Za-z0-9._:-]+\/[A-Za-z0-9._:-]+\/[A-Fa-f0-9]{32,}\.ndjson(?:\.gz)?/g, "[redacted-object-key]")
+    .replace(/\\\\[^\\\s"'<>]+\\[^\s"'<>]+/g, "[redacted-path]")
     .replace(/[A-Za-z]:[\\/][^\s"'<>]+/g, "[redacted-path]")
     .replace(/\/[^\s"'<>]+/g, "[redacted-path]")
-    .replace(/[A-Za-z0-9._:-]+\/[A-Za-z0-9._:-]+\/[A-Fa-f0-9]{32,}\.ndjson(?:\.gz)?/g, "[redacted-object-key]")
+    .replace(/S-\d-\d+(?:-\d+){1,14}/g, "[redacted-sid]")
+    .slice(0, 500);
+}
+
+function safeFindingEvidence(evidence: string | null): string | null {
+  if (!evidence) {
+    return null;
+  }
+  return evidence
+    .replace(/\\\\[^\\\s"'<>]+\\[^\s"'<>]+/g, "[redacted-path]")
+    .replace(/[A-Za-z]:[\\/][^\s"'<>]+/g, "[redacted-path]")
+    .replace(/\/[^\s"'<>]+/g, "[redacted-path]")
+    .replace(/S-\d-\d+(?:-\d+){1,14}/g, "[redacted-sid]")
     .slice(0, 500);
 }
 
@@ -2493,6 +2651,10 @@ function sanitizeOpaqueID(value: string): string {
     return "";
   }
   return trimmed;
+}
+
+function isSafeFilterToken(value: string): boolean {
+  return value.length <= 128 && /^[A-Za-z0-9._:-]+$/.test(value);
 }
 
 function normalizeAccessTeamDomain(value: string): string {

@@ -4,6 +4,7 @@ const pageSizes = new Set([10, 25, 50, 100]);
 const pageSizeStorageKeys = {
   devicePageSize: "hive.devices.page.size",
   attentionPageSize: "hive.attention.page.size",
+  findingsPageSize: "hive.findings.page.size",
   runPageSize: "hive.runs.page.size",
   inventoryPageSize: "hive.inventory.page.size",
   detailInventoryPageSize: "hive.detail.inventory.page.size",
@@ -20,12 +21,14 @@ const state = {
   packageView: storedPackageView(),
   devicePageSize: storedPageSize("devicePageSize"),
   attentionPageSize: storedPageSize("attentionPageSize"),
+  findingsPageSize: storedPageSize("findingsPageSize"),
   runPageSize: storedPageSize("runPageSize"),
   inventoryPageSize: storedPageSize("inventoryPageSize"),
   detailInventoryPageSize: storedPageSize("detailInventoryPageSize"),
   normalizationPageSize: storedPageSize("normalizationPageSize"),
   devicePage: 1,
   attentionPage: 1,
+  findingsPage: 1,
   runPage: 1,
   inventoryPage: 1,
   detailInventoryPage: 1,
@@ -43,6 +46,16 @@ const el = {
   attentionReason: document.querySelector("#attention-reason"),
   attentionBody: document.querySelector("#attention-body"),
   attentionPagination: document.querySelector("#attention-pagination"),
+  findingsPageSize: document.querySelector("#findings-page-size"),
+  findingSeverity: document.querySelector("#finding-severity"),
+  findingCatalog: document.querySelector("#finding-catalog"),
+  findingQuery: document.querySelector("#finding-query"),
+  findingEcosystem: document.querySelector("#finding-ecosystem"),
+  findingProfile: document.querySelector("#finding-profile"),
+  findingDevice: document.querySelector("#finding-device"),
+  findingRun: document.querySelector("#finding-run"),
+  findingsBody: document.querySelector("#findings-body"),
+  findingsPagination: document.querySelector("#findings-pagination"),
   deviceStatus: document.querySelector("#device-status"),
   runStatus: document.querySelector("#run-status"),
   runProfile: document.querySelector("#run-profile"),
@@ -114,6 +127,7 @@ function storedPageSize(stateKey) {
 function syncPageSizeControls() {
   el.devicePageSize.value = String(state.devicePageSize);
   el.attentionPageSize.value = String(state.attentionPageSize);
+  el.findingsPageSize.value = String(state.findingsPageSize);
   el.runPageSize.value = String(state.runPageSize);
   el.inventoryPageSize.value = String(state.inventoryPageSize);
   el.detailInventoryPageSize.value = String(state.detailInventoryPageSize);
@@ -225,6 +239,7 @@ function offsetForPage(page, limit) {
 
 function resetPages() {
   state.devicePage = 1;
+  state.findingsPage = 1;
   state.runPage = 1;
   state.inventoryPage = 1;
   state.detailInventoryPage = 1;
@@ -236,6 +251,7 @@ function applyUrlStateFromLocation() {
   state.selectedDeviceId = deviceIdFromPath(url.pathname);
   state.devicePageSize = pageSizeFromValue(params.get("device_page_size") || params.get("page_size"), storedPageSize("devicePageSize"));
   state.attentionPageSize = pageSizeFromValue(params.get("attention_page_size") || params.get("page_size"), storedPageSize("attentionPageSize"));
+  state.findingsPageSize = pageSizeFromValue(params.get("findings_page_size") || params.get("page_size"), storedPageSize("findingsPageSize"));
   state.runPageSize = pageSizeFromValue(params.get("run_page_size") || params.get("page_size"), storedPageSize("runPageSize"));
   state.inventoryPageSize = pageSizeFromValue(params.get("inventory_page_size") || params.get("page_size"), storedPageSize("inventoryPageSize"));
   state.detailInventoryPageSize = pageSizeFromValue(params.get("detail_inventory_page_size") || params.get("page_size"), storedPageSize("detailInventoryPageSize"));
@@ -243,6 +259,7 @@ function applyUrlStateFromLocation() {
   syncPageSizeControls();
   state.devicePage = pageFromParams(params, "device_page");
   state.attentionPage = pageFromParams(params, "attention_page");
+  state.findingsPage = pageFromParams(params, "findings_page");
   state.runPage = pageFromParams(params, "run_page");
   state.inventoryPage = pageFromParams(params, "inventory_page");
   state.detailInventoryPage = pageFromParams(params, "detail_inventory_page");
@@ -250,6 +267,13 @@ function applyUrlStateFromLocation() {
   setSelectValue(el.deviceStatus, params.get("device_status") || "active", "active");
   setSelectValue(el.attentionSeverity, params.get("attention_severity") || "all", "all");
   setSelectValue(el.attentionReason, params.get("attention_reason") || "", "");
+  el.findingSeverity.value = params.get("finding_severity") || "";
+  el.findingCatalog.value = params.get("finding_catalog") || "";
+  el.findingQuery.value = params.get("finding_query") || "";
+  el.findingEcosystem.value = params.get("finding_ecosystem") || "";
+  el.findingProfile.value = params.get("finding_profile") || "";
+  el.findingDevice.value = params.get("finding_device") || "";
+  el.findingRun.value = params.get("finding_run") || "";
   setSelectValue(el.runStatus, params.get("run_status") || "", "");
   setSelectValue(el.normalizationStatus, params.get("normalization_status") || "", "");
   setSelectValue(el.normalizationPromoted, params.get("normalization_promoted") || "", "");
@@ -297,6 +321,15 @@ function currentAdminPath() {
   setParamIfValue(params, "attention_severity", el.attentionSeverity.value, "all");
   setParamIfValue(params, "attention_reason", el.attentionReason.value);
   setPageParam(params, "attention_page", state.attentionPage);
+  setPageSizeParam(params, "findings_page_size", state.findingsPageSize);
+  setParamIfValue(params, "finding_severity", el.findingSeverity.value.trim());
+  setParamIfValue(params, "finding_catalog", el.findingCatalog.value.trim());
+  setParamIfValue(params, "finding_query", el.findingQuery.value.trim());
+  setParamIfValue(params, "finding_ecosystem", el.findingEcosystem.value.trim());
+  setParamIfValue(params, "finding_profile", el.findingProfile.value.trim());
+  setParamIfValue(params, "finding_device", el.findingDevice.value.trim());
+  setParamIfValue(params, "finding_run", el.findingRun.value.trim());
+  setPageParam(params, "findings_page", state.findingsPage);
   params.set("inventory_view", state.packageView);
   setParamIfValue(params, "package_query", el.packageQuery.value.trim());
   setParamIfValue(params, "ecosystem", el.packageEcosystem.value.trim());
@@ -430,6 +463,41 @@ async function loadAttention() {
       </tr>
     `;
   }).join("");
+}
+
+async function loadFindings() {
+  const params = new URLSearchParams({
+    limit: String(state.findingsPageSize),
+    offset: String(offsetForPage(state.findingsPage, state.findingsPageSize))
+  });
+  if (el.findingSeverity.value.trim()) params.set("severity", el.findingSeverity.value.trim());
+  if (el.findingCatalog.value.trim()) params.set("catalog_id", el.findingCatalog.value.trim());
+  if (el.findingQuery.value.trim()) params.set("query", el.findingQuery.value.trim());
+  if (el.findingEcosystem.value.trim()) params.set("ecosystem", el.findingEcosystem.value.trim());
+  if (el.findingProfile.value.trim()) params.set("profile", el.findingProfile.value.trim());
+  if (el.findingDevice.value.trim()) params.set("device_id", el.findingDevice.value.trim());
+  if (el.findingRun.value.trim()) params.set("run_id", el.findingRun.value.trim());
+  const data = await getJSON(`/v1/ui/admin/findings?${params.toString()}`);
+  state.findingsPage = data.page || state.findingsPage;
+  text("#findings-total", formatNumber(data.counts.total));
+  renderPagination(el.findingsPagination, data, "findingsPage");
+  if (data.findings.length === 0) {
+    el.findingsBody.innerHTML = '<tr><td colspan="9">No exposure findings found.</td></tr>';
+    return;
+  }
+  el.findingsBody.innerHTML = data.findings.map((finding) => `
+    <tr data-package-name="${escapeHtml(finding.normalized_name || finding.package_name || "")}" data-package-ecosystem="${escapeHtml(finding.ecosystem || "")}" data-package-profile="${escapeHtml(finding.profile || "")}" data-device-id="${escapeHtml(finding.device_id || "")}">
+      <td>${statusBadge(finding.severity || "unspecified")}</td>
+      <td>${escapeHtml(finding.catalog_name || finding.catalog_id || "-")}<br><small>${escapeHtml(finding.catalog_id || "-")}</small></td>
+      <td>${packageName(finding)}<br><small>${escapeHtml(finding.version || "-")}</small></td>
+      <td>${packageDeviceButton(finding.device_id)}</td>
+      <td>${escapeHtml(finding.profile || "-")}</td>
+      <td title="${escapeHtml(finding.run_id)}">${escapeHtml(shortId(finding.run_id))}</td>
+      <td>${escapeHtml([finding.source_type, finding.root_kind, finding.confidence].filter(Boolean).join(" / ") || "-")}</td>
+      <td>${escapeHtml(finding.evidence || "-")}</td>
+      <td>${escapeHtml(formatTime(finding.received_at))}</td>
+    </tr>
+  `).join("");
 }
 
 async function loadHealth() {
@@ -776,7 +844,7 @@ async function loadDevicePackages(deviceId = state.selectedDeviceId) {
 async function refreshAll() {
   el.error.hidden = true;
   try {
-    await Promise.all([loadOverview(), loadAttention(), loadHealth(), loadDevices(), loadPackages(), loadRuns(), loadNormalizationJobs()]);
+    await Promise.all([loadOverview(), loadAttention(), loadFindings(), loadHealth(), loadDevices(), loadPackages(), loadRuns(), loadNormalizationJobs()]);
     el.lastRefresh.textContent = `Last refreshed ${new Date().toLocaleString()}`;
   } catch (error) {
     showError(error);
@@ -834,6 +902,7 @@ function clearPackageSelection(mode = "push") {
 el.refresh.addEventListener("click", refreshAll);
 el.devicePageSize.addEventListener("change", () => setPageSize("devicePageSize", "devicePage", el.devicePageSize, loadDevices));
 el.attentionPageSize.addEventListener("change", () => setPageSize("attentionPageSize", "attentionPage", el.attentionPageSize, loadAttention));
+el.findingsPageSize.addEventListener("change", () => setPageSize("findingsPageSize", "findingsPage", el.findingsPageSize, loadFindings));
 el.attentionSeverity.addEventListener("change", () => {
   state.attentionPage = 1;
   syncUrlState("replace");
@@ -844,6 +913,13 @@ el.attentionReason.addEventListener("change", () => {
   syncUrlState("replace");
   loadAttention();
 });
+for (const input of [el.findingSeverity, el.findingCatalog, el.findingQuery, el.findingEcosystem, el.findingProfile, el.findingDevice, el.findingRun]) {
+  input.addEventListener("input", () => {
+    state.findingsPage = 1;
+    syncUrlState("replace");
+    loadFindings();
+  });
+}
 el.deviceStatus.addEventListener("change", () => {
   state.devicePage = 1;
   syncUrlState("replace");
@@ -944,6 +1020,22 @@ el.attentionBody.addEventListener("click", (event) => {
   const row = event.target.closest("tr[data-device-id]");
   if (row) selectDevice(row.dataset.deviceId);
 });
+el.findingsBody.addEventListener("click", (event) => {
+  const button = event.target.closest("button[data-open-device]");
+  if (button) {
+    selectDevice(button.dataset.openDevice);
+    return;
+  }
+  const row = event.target.closest("tr[data-package-name]");
+  if (row) {
+    selectPackage({
+      normalized_name: row.dataset.packageName,
+      ecosystem: row.dataset.packageEcosystem,
+      profile: row.dataset.packageProfile,
+      device_id: row.dataset.deviceId
+    });
+  }
+});
 el.packagesBody.addEventListener("click", (event) => {
   if (event.target.closest("details, summary, button, input, select, a")) return;
   const row = event.target.closest("tr[data-package-name]");
@@ -971,6 +1063,10 @@ el.devicesPagination.addEventListener("click", (event) => {
 el.attentionPagination.addEventListener("click", (event) => {
   const button = event.target.closest("button[data-page]");
   if (button) setPage("attentionPage", button.dataset.page, loadAttention);
+});
+el.findingsPagination.addEventListener("click", (event) => {
+  const button = event.target.closest("button[data-page]");
+  if (button) setPage("findingsPage", button.dataset.page, loadFindings);
 });
 el.packagesPagination.addEventListener("click", (event) => {
   const button = event.target.closest("button[data-page]");

@@ -1,0 +1,288 @@
+version: 2
+
+goal:
+  title: "Hive Exposure Findings Visibility"
+  slug: "hive-exposure-findings-visibility"
+  kind: existing_plan
+  tranche: "Complete one local metadata-only findings visibility slice: APIs, UI, indexes, docs, verifier, and tests."
+  status: done
+  oracle:
+    signal: "Hive exposes paginated findings through admin-token and UI-Access routes, the admin UI has a recoverable Findings panel, and forbidden-field checks pass."
+    cadence: "after each Worker package and at final audit"
+    final_proof: "Passing tests, typecheck, build, Wrangler dry-run, verifier syntax/check coverage, docs, and final audit receipt."
+  intake:
+    original_request: "$goalbuddy:goal-prep"
+    interpreted_outcome: "Prepare a GoalBuddy board to implement Hive exposure findings visibility from existing Bumblebee finding data."
+    input_shape: existing_plan
+    audience: "Hive operators and maintainers"
+    authority: approved
+    proof_type: test
+    completion_proof: "Findings API/UI/docs/verifier are implemented and verified without exposing forbidden raw fields."
+    likely_misfire: "Adding alerting, Attention workflow, raw evidence browsing, or current-only package behavior instead of all-history findings visibility."
+    blind_spots_considered:
+      - "Historical findings are the default; current-only is not the tranche."
+      - "Attention queue integration is explicitly out of scope."
+      - "Bumblebee evidence text is allowed; source_file and project_path are not."
+      - "D1 indexes are needed for newest-first and common filters."
+      - "URL state and verifier coverage should stay aligned with the admin UI."
+    existing_plan_facts:
+      - "Add GET /v1/admin/findings and GET /v1/ui/admin/findings."
+      - "Default to all historical findings, newest first."
+      - "Filter by severity, catalog_id, ecosystem, query, device_id, profile, and run_id."
+      - "Expose device_id, run_id, record_id, profile, finding_type, severity, catalog_id, catalog_name, ecosystem, package_name, normalized_name, version, root_kind, source_type, confidence, evidence, and received_at."
+      - "Add migration 0008_exposure_findings_visibility_indexes.sql."
+      - "Add an Admin UI Findings panel with row-count selector, filters, URL recovery, device drill-through, and package drill-through."
+      - "Update scripts/verify-bumblebee-pilot.ps1 and README."
+
+rules:
+  pm_owns_state: true
+  one_active_task: true
+  max_write_workers: 1
+  no_implementation_without_worker_or_pm_task: true
+  no_completion_without_judge_or_pm_audit: true
+  planning_is_not_completion: true
+  queued_required_worker_blocks_completion: true
+  continuous_until_full_outcome: true
+  missing_input_or_credentials_do_not_stop_goal: true
+  preserve_and_validate_existing_plan: true
+  intake_misfire_must_be_audited: true
+  goal_pressure_requires_oracle: true
+  no_completion_on_weak_proof: true
+  slice_policy:
+    max_consecutive_tiny_tasks: 2
+    prefer_vertical_slices: true
+    judge_picks_largest_safe_slice: true
+    worker_completes_whole_slice: true
+
+agents:
+  scout: bundled_not_installed
+  worker: bundled_not_installed
+  judge: bundled_not_installed
+
+visual_board:
+  selected: local
+  local:
+    status: live
+    url: "http://goalbuddy.localhost:41737/hive-exposure-findings-visibility/"
+    command: "node C:\\Users\\bbutner\\.codex\\plugins\\cache\\goalbuddy\\goalbuddy\\0.3.7\\skills\\goalbuddy\\surfaces\\local-goal-board\\scripts\\local-goal-board.mjs --goal docs/goals/hive-exposure-findings-visibility --host goalbuddy.localhost --port 41737"
+
+active_task: null
+
+tasks:
+  - id: T001
+    type: judge
+    assignee: Judge
+    status: done
+    reasoning_hint: high
+    objective: "Validate the existing findings-visibility plan against the current Hive code before implementation."
+    inputs:
+      - "docs/goals/hive-exposure-findings-visibility/goal.md"
+      - "src/index.ts"
+      - "migrations/0005_normalized_inventory.sql"
+      - "public/admin/index.html"
+      - "public/admin/app.js"
+      - "test/ingest.test.ts"
+      - "test/admin-url-state.test.ts"
+      - "scripts/verify-bumblebee-pilot.ps1"
+      - "README.md"
+    constraints:
+      - "Read-only."
+      - "Preserve the existing plan unless repo evidence shows a concrete mismatch."
+      - "Do not add Attention integration or raw evidence exposure."
+    expected_output:
+      - "approve | revise | block"
+      - "Confirmed API response fields and filters."
+      - "Exact Worker objective."
+      - "allowed_files."
+      - "verify commands."
+      - "stop_if conditions."
+    receipt:
+      result: done
+      decision: approved
+      full_outcome_complete: false
+      summary: "Approved the existing findings-visibility plan against current Hive code. Hive already stores normalized findings in exposure_findings; the missing surface is route/UI/verifier/docs visibility."
+      evidence:
+        - "src/index.ts routes include attention, normalization, packages, runs, and devices but no findings route."
+        - "src/index.ts normalizes record_type=finding into exposure_findings."
+        - "migrations/0005_normalized_inventory.sql defines exposure_findings and the package lookup index."
+        - "public/admin/index.html and public/admin/app.js have no Findings panel or URL state."
+      worker_objective: "Implement the approved Hive findings visibility slice end to end using exposure_findings as the source table."
+      allowed_files:
+        - "src/index.ts"
+        - "migrations/0008_exposure_findings_visibility_indexes.sql"
+        - "public/admin/index.html"
+        - "public/admin/app.js"
+        - "public/admin/styles.css"
+        - "test/ingest.test.ts"
+        - "test/admin-url-state.test.ts"
+        - "scripts/verify-bumblebee-pilot.ps1"
+        - "README.md"
+      verify:
+        - "npm test"
+        - "npm run typecheck"
+        - "npm run build"
+        - "npx wrangler deploy --dry-run"
+        - "git diff --check"
+  - id: T002
+    type: worker
+    assignee: Worker
+    status: done
+    reasoning_hint: medium
+    objective: "Implement the approved Hive findings visibility slice end to end."
+    allowed_files:
+      - "src/index.ts"
+      - "migrations/0008_exposure_findings_visibility_indexes.sql"
+      - "public/admin/index.html"
+      - "public/admin/app.js"
+      - "public/admin/styles.css"
+      - "test/ingest.test.ts"
+      - "test/admin-url-state.test.ts"
+      - "scripts/verify-bumblebee-pilot.ps1"
+      - "README.md"
+    verify:
+      - "npm test"
+      - "npm run typecheck"
+      - "npm run build"
+      - "npx wrangler deploy --dry-run"
+      - "git diff --check"
+    stop_if:
+      - "T001 does not approve the implementation shape."
+      - "Need to expose source_file, project_path, summary_json, raw payloads, object keys, hostnames, usernames, SIDs, or secrets."
+      - "Need production migration, production deploy, push, or secret changes."
+      - "Need files outside allowed_files."
+      - "Verification fails twice for the same underlying cause."
+    receipt:
+      result: done
+      changed_files:
+        - "src/index.ts"
+        - "migrations/0008_exposure_findings_visibility_indexes.sql"
+        - "public/admin/index.html"
+        - "public/admin/app.js"
+        - "test/ingest.test.ts"
+        - "test/admin-url-state.test.ts"
+        - "scripts/verify-bumblebee-pilot.ps1"
+        - "README.md"
+      summary: "Implemented metadata-only findings visibility from exposure_findings through admin-token and UI-Access routes, a recoverable Admin UI Findings panel, D1 indexes, verifier coverage, docs, and regression tests."
+      commands:
+        - cmd: "npm test -- test/ingest.test.ts"
+          status: pass
+        - cmd: "npm test -- test/admin-url-state.test.ts"
+          status: pass
+        - cmd: "npm test"
+          status: pass
+        - cmd: "npm run typecheck"
+          status: pass
+        - cmd: "npm run build"
+          status: pass
+        - cmd: "npx wrangler deploy --dry-run"
+          status: pass
+        - cmd: "git diff --check"
+          status: pass
+        - cmd: "PowerShell parser check for scripts/verify-bumblebee-pilot.ps1"
+          status: pass
+      exposure_boundary:
+        allowed_fields:
+          - "device_id"
+          - "run_id"
+          - "record_id"
+          - "profile"
+          - "finding_type"
+          - "severity"
+          - "catalog_id"
+          - "catalog_name"
+          - "ecosystem"
+          - "package_name"
+          - "normalized_name"
+          - "version"
+          - "root_kind"
+          - "source_type"
+          - "confidence"
+          - "evidence"
+          - "received_at"
+        forbidden_fields_not_exposed:
+          - "raw payloads"
+          - "summary_json"
+          - "R2 object keys"
+          - "HMAC material"
+          - "Access credentials"
+          - "hostnames"
+          - "usernames"
+          - "SIDs"
+          - "source_file"
+          - "project_path"
+          - "local paths"
+  - id: T003
+    type: worker
+    assignee: Worker
+    status: done
+    reasoning_hint: medium
+    objective: "Run local smoke verification and capture redacted evidence for the implemented findings visibility slice."
+    allowed_files:
+      - "docs/goals/hive-exposure-findings-visibility/state.yaml"
+      - "docs/goals/hive-exposure-findings-visibility/notes/**"
+    verify:
+      - "Use local or test-backed admin/API calls to prove findings list behavior."
+      - "Use verifier parser/check output if local pilot config is available."
+      - "Confirm no forbidden fields appear in captured evidence."
+    stop_if:
+      - "Local credentials or pilot config are unavailable; record skipped condition and continue to final audit."
+      - "Smoke would require printing secrets or raw device identifiers."
+    receipt:
+      result: done
+      changed_files:
+        - "docs/goals/hive-exposure-findings-visibility/state.yaml"
+      summary: "Local/test-backed smoke evidence captured through the ingest regression test: two real normalized finding records are ingested, queried through /v1/admin/findings and /v1/ui/admin/findings, filtered by metadata, paginated, and checked for no forbidden fields. Live pilot CheckOnly was intentionally not run because production migration/deploy is outside this tranche."
+      commands:
+        - cmd: "npm test -- test/ingest.test.ts"
+          status: pass
+        - cmd: "PowerShell parser check for scripts/verify-bumblebee-pilot.ps1"
+          status: pass
+      skipped:
+        - "Live scripts/verify-bumblebee-pilot.ps1 CheckOnly against production: requires applying migration 0008 and deploying the Worker, which T002 stop_if excludes."
+  - id: T999
+    type: judge
+    assignee: Judge
+    status: done
+    reasoning_hint: high
+    objective: "Audit whether the findings visibility tranche satisfies the original outcome."
+    inputs:
+      - "All done task receipts."
+      - "Last verification."
+      - "Current dirty diff."
+      - "docs/goals/hive-exposure-findings-visibility/goal.md"
+    constraints:
+      - "Read-only."
+      - "Reject completion if any required Worker task is still queued or active."
+      - "Reject completion if forbidden fields are exposed."
+      - "Reject completion if tests, typecheck, build, or dry-run evidence is missing."
+    expected_output:
+      - "complete | not_complete"
+      - "full_outcome_complete: true | false"
+      - "missing evidence"
+      - "next task if not complete"
+    receipt:
+      result: done
+      decision: complete
+      full_outcome_complete: true
+      summary: "The tranche is complete: findings are exposed as metadata-only historical rows via admin and UI routes, the UI has recoverable filters/pagination, docs and verifier know about the route, tests verify field safety, and build/dry-run checks pass."
+      evidence:
+        - "npm test: 3 files, 50 tests passed."
+        - "npm run typecheck: passed."
+        - "npm run build: passed."
+        - "npx wrangler deploy --dry-run: passed."
+        - "git diff --check: passed."
+        - "PowerShell parser check for verifier: passed."
+        - "GoalBuddy state checker: ok before final closeout."
+
+checks:
+  dirty_fingerprint: "findings visibility implementation plus GoalBuddy receipts"
+  last_verification:
+    result: pass
+    task: T999
+    commands:
+      - "npm test"
+      - "npm run typecheck"
+      - "npm run build"
+      - "npx wrangler deploy --dry-run"
+      - "git diff --check"
+      - "PowerShell parser check for scripts/verify-bumblebee-pilot.ps1"

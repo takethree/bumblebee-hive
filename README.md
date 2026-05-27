@@ -48,14 +48,17 @@ drill-down state is recoverable in the same admin route with query parameters
 such as `selected_package`, `selected_ecosystem`, `selected_profile`, and
 `selected_device`. The UI also preserves key filters in query parameters such
 as `device_status`, `attention_severity`, `attention_reason`,
-`inventory_view`, `package_query`, `ecosystem`, `profile`,
+`finding_severity`, `finding_catalog`, `finding_query`, `finding_ecosystem`,
+`finding_profile`, `finding_device`, `finding_run`, `inventory_view`,
+`package_query`, `ecosystem`, `profile`,
 `run_status`, `run_profile`, `normalization_status`,
 `normalization_promoted`, `normalization_device`, and `normalization_run`.
 Numbered table pages are recoverable through `device_page`, `attention_page`,
-`inventory_page`, `run_page`, `normalization_page`, and `detail_inventory_page`. The
-UI defaults to 10 rows per page and lets operators choose 10, 25, 50, or 100
-rows next to each paginated list. Non-default choices are recoverable through
-`device_page_size`, `attention_page_size`, `inventory_page_size`, `run_page_size`,
+`findings_page`, `inventory_page`, `run_page`, `normalization_page`, and
+`detail_inventory_page`. The UI defaults to 10 rows per page and lets operators
+choose 10, 25, 50, or 100 rows next to each paginated list. Non-default choices
+are recoverable through `device_page_size`, `attention_page_size`,
+`findings_page_size`, `inventory_page_size`, `run_page_size`,
 `normalization_page_size`, and `detail_inventory_page_size`. Auto-refresh
 remains local browser state and is not encoded in the URL.
 
@@ -72,10 +75,10 @@ the protected Hive application. The UI routes validate the
 `Cf-Access-Jwt-Assertion` header against the Access JWKS before returning
 metadata.
 
-The UI shows overview totals, attention, health, devices, device detail, runs, and
-metadata-only device lifecycle events. It does not expose raw inventory
-records, `summary_json`, R2 object keys, HMAC material, Access credentials,
-local usernames, SIDs, hostnames, or profile paths.
+The UI shows overview totals, attention, health, exposure findings, devices,
+device detail, runs, and metadata-only device lifecycle events. It does not
+expose raw inventory records, `summary_json`, R2 object keys, HMAC material,
+Access credentials, local usernames, SIDs, hostnames, or profile paths.
 
 Device lifecycle write actions in the UI require an additional Hive-managed
 allowlist after Access login:
@@ -146,6 +149,25 @@ Attention reasons:
 Disabled devices are excluded. Attention responses are metadata-only and do not
 expose raw inventory, `summary_json`, R2 object keys, HMAC material, Access
 credentials, local usernames, SIDs, hostnames, or profile paths.
+
+### Operator findings
+
+The dashboard includes a read-only findings view backed by
+`GET /v1/ui/admin/findings`. Script/operator callers can use the matching
+`GET /v1/admin/findings` endpoint. Findings are served from normalized
+Bumblebee `record_type=finding` data in D1 and default to all historical
+findings, newest first.
+
+Findings support `severity`, `catalog_id`, `ecosystem`, `query`, `device_id`,
+`profile`, `run_id`, `limit`, and `offset`. Responses include `counts`,
+`findings`, pagination metadata, and `filters`.
+
+Finding rows expose only metadata needed for operator triage: device ID, run
+ID, record ID, profile, finding type, severity, catalog ID/name, ecosystem,
+package name, normalized package name, version, root kind, source type,
+confidence, sanitized evidence text, and received time. They do not expose raw
+payloads, `summary_json`, R2 object keys, HMAC material, Access credentials,
+hostnames, usernames, SIDs, `source_file`, `project_path`, or local paths.
 
 ## Retention
 
@@ -309,6 +331,7 @@ Supported endpoints:
 
 - `GET /v1/admin/overview`
 - `GET /v1/admin/attention?severity=all|critical|warning&reason=<reason>&limit=10&offset=0`
+- `GET /v1/admin/findings?severity=critical&catalog_id=<catalog-id>&ecosystem=npm&query=<package>&device_id=<device-id>&profile=baseline&run_id=<run-id>&limit=10&offset=0`
 - `GET /v1/admin/devices?status=active|disabled|all&limit=50&offset=0`
 - `GET /v1/admin/devices/<device-id>`
 - `GET /v1/admin/runs?device_id=<device-id>&status=complete&profile=baseline&limit=50&offset=0`
@@ -411,6 +434,63 @@ Example response:
   "filters": {
     "severity": "critical",
     "reason": null
+  }
+}
+```
+
+Example findings list:
+
+```powershell
+Invoke-RestMethod `
+  -Uri "https://hive.example.com/v1/admin/findings?severity=critical&limit=10&offset=0" `
+  -Headers $headers
+```
+
+Example response:
+
+```json
+{
+  "counts": {
+    "total": 1,
+    "severities": {
+      "critical": 1
+    }
+  },
+  "findings": [
+    {
+      "device_id": "device-redacted",
+      "run_id": "run-redacted",
+      "record_id": "finding-redacted",
+      "profile": "baseline",
+      "finding_type": "package_exposure",
+      "severity": "critical",
+      "catalog_id": "advisory-redacted",
+      "catalog_name": "example advisory",
+      "ecosystem": "npm",
+      "package_name": "left-pad",
+      "normalized_name": "left-pad",
+      "version": "1.3.0",
+      "root_kind": "project_root",
+      "source_type": "package-lock",
+      "confidence": "high",
+      "evidence": "found in [redacted-path]",
+      "received_at": "2026-05-27T10:00:01.000Z"
+    }
+  ],
+  "limit": 10,
+  "offset": 0,
+  "total": 1,
+  "page": 1,
+  "page_count": 1,
+  "has_more": false,
+  "filters": {
+    "severity": "critical",
+    "catalog_id": null,
+    "ecosystem": null,
+    "query": null,
+    "device_id": null,
+    "profile": null,
+    "run_id": null
   }
 }
 ```
@@ -570,8 +650,8 @@ and latest observed metadata. It is intentionally not a raw observation browser.
 The admin UI explicitly defaults to the package-family view and stores the
 operator's selected grouping mode in browser local storage. The API default
 stays `view=summary` for compatibility with script callers.
-The UI shows exact numbered pagination for devices, runs, global inventory, and
-selected-device package inventory. Page changes update the URL with
+The UI shows exact numbered pagination for devices, findings, runs, global
+inventory, and selected-device package inventory. Page changes update the URL with
 recoverable page parameters while filter and per-list page-size changes reset
 the affected table to page one. The browser UI defaults to 10 rows per page;
 script callers can continue to pass explicit `limit` and `offset` values.
@@ -588,7 +668,7 @@ Use `scripts\verify-bumblebee-pilot.ps1` on a pilot Windows host after the
 bootstrapper has installed Bumblebee, enrolled Hive, and registered the scheduled
 task. The verifier reads the local Bumblebee config, decrypts only the local
 DPAPI-protected secrets needed for the check, calls Hive admin metadata
-endpoints, and emits redacted JSON.
+endpoints including findings visibility, and emits redacted JSON.
 
 The verifier intentionally does not print secrets, raw inventory, raw HTTP
 payloads, raw device IDs, usernames, SIDs, hostnames, full profile paths, R2
