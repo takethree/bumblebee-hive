@@ -1,0 +1,268 @@
+# GoalBuddy v2 state.yaml
+# Board truth lives here. goal.md is the editable charter; notes/ holds long receipts only.
+
+version: 2
+
+goal:
+  title: "Hive Checkpoint and Pagination"
+  slug: "hive-checkpoint-pagination"
+  kind: existing_plan
+  tranche: "Commit and push the current deployed Hive work, then add exact numbered pagination to the admin UI."
+  status: active
+  oracle:
+    signal: "Goal-shaped commits are pushed, exact pagination metadata is additive on admin APIs, numbered pagination works in the UI and URL state, and verification plus redacted live smoke pass."
+    cadence: "after checkpoint, after local pagination implementation, after deploy/live smoke if credentials are available"
+    final_proof: "Pushed commits, passing tests/typecheck/lint, Wrangler dry-runs, UI/API pagination tests, redacted live smoke, and final Judge audit."
+  intake:
+    original_request: "$goalbuddy:goal-prep for the approved checkpoint plus numbered pagination plan."
+    interpreted_outcome: "Safely preserve deployed Hive work in pushed commits, then implement exact numbered pagination for the Hive admin UI without exposing sensitive data or breaking existing clients."
+    input_shape: existing_plan
+    audience: "Hive maintainers and operators."
+    authority: approved
+    proof_type: test
+    completion_proof: "Current deployed work is pushed in defensible commits; admin API pagination metadata and UI numbered pagination are implemented, tested, documented, deployed if appropriate, and smoke-tested with redacted evidence."
+    likely_misfire: "Only add page buttons over the first page, skip exact totals, commit unrelated or secret-bearing files, or leave one admin view unpaginated."
+    blind_spots_considered:
+      - "The repo currently contains multiple deployed but uncommitted goal slices, so staging must be deliberate."
+      - "Exact numbered pagination requires count queries, not only existing limit/offset metadata."
+      - "Package totals differ by view because package, summary, and observations group rows differently."
+      - "URL state must remain recoverable without cluttering history on every filter keystroke."
+      - "Redacted live smoke must not print raw device IDs, package names, hostnames, usernames, paths, object keys, secrets, or raw payloads."
+    existing_plan_facts:
+      - "Split current dirty deployed work into goal-shaped commits."
+      - "Push the checkpoint before new pagination implementation starts."
+      - "Add additive metadata: total, page, page_count, and has_more."
+      - "Implement numbered pagination for devices, runs, inventory, and selected-device packages."
+      - "Add URL state keys: device_page, run_page, inventory_page, detail_inventory_page."
+      - "Use pushState for page navigation and replaceState for filter changes."
+
+rules:
+  pm_owns_state: true
+  one_active_task: true
+  max_write_workers: 1
+  no_implementation_without_worker_or_pm_task: true
+  no_completion_without_judge_or_pm_audit: true
+  planning_is_not_completion: true
+  queued_required_worker_blocks_completion: true
+  continuous_until_full_outcome: true
+  missing_input_or_credentials_do_not_stop_goal: true
+  preserve_and_validate_existing_plan: true
+  intake_misfire_must_be_audited: true
+  goal_pressure_requires_oracle: true
+  no_completion_on_weak_proof: true
+  slice_policy:
+    max_consecutive_tiny_tasks: 2
+    prefer_vertical_slices: true
+    judge_picks_largest_safe_slice: true
+    worker_completes_whole_slice: true
+
+agents:
+  scout: bundled_not_installed
+  worker: bundled_not_installed
+  judge: bundled_not_installed
+
+visual_board:
+  selected: local
+  local:
+    status: blocked
+    url: "http://goalbuddy.localhost:41737/hive-checkpoint-pagination/"
+    command: "npx goalbuddy board docs/goals/hive-checkpoint-pagination"
+    error: "Local board was not started during prep because npx goalbuddy board failed while fetching the GoalBuddy catalog with HTTP 404. File-backed board remains usable."
+
+active_task: T002
+
+tasks:
+  - id: T001
+    type: judge
+    assignee: Judge
+    status: done
+    reasoning_hint: high
+    objective: "Validate the dirty deployed Hive checkpoint split and approve the safest commit/push package before any new pagination edits."
+    inputs:
+      - "docs/goals/hive-checkpoint-pagination/goal.md"
+      - "docs/goals/hive-checkpoint-pagination/state.yaml"
+      - "Current Hive git status and staged/unstaged diffs"
+      - "Completed goal boards for normalized inventory, inventory summary view, grouping preference, and URL state recovery"
+      - "Approved plan from chat"
+    constraints:
+      - "Read-only."
+      - "Do not stage, commit, push, edit implementation files, or run deployment."
+      - "Do not print raw payloads, raw device IDs, package names from live data, hostnames, usernames, SIDs, source paths, project paths, object keys, secrets, HMAC material, or summary_json."
+      - "Reject any checkpoint split that risks dropping deployed behavior or staging secret-bearing files."
+    expected_output:
+      - "Decision: approve | revise | block"
+      - "Exact commit grouping"
+      - "Files allowed to be staged for each commit"
+      - "Pre-commit verification commands"
+      - "Stop conditions"
+      - "Any board task replacements needed"
+    receipt:
+      result: done
+      decision: approve_with_revision
+      exact_commit_grouping:
+        - message: "hive: add normalized inventory and admin inventory views"
+          files:
+            - "README.md"
+            - "public/admin/app.js"
+            - "public/admin/index.html"
+            - "public/admin/styles.css"
+            - "src/index.ts"
+            - "test/ingest.test.ts"
+            - "wrangler.toml"
+            - "migrations/0005_normalized_inventory.sql"
+            - "docs/goals/hive-normalized-inventory/**"
+            - "docs/goals/hive-inventory-summary-view/**"
+            - "docs/goals/hive-inventory-grouping-preference/**"
+          note: "The implementation hunks for normalized inventory, summary view, and grouping preference are cumulative inside the same Worker/UI files. Split their goal docs, but keep the implementation together to avoid unsafe synthetic history."
+        - message: "hive: add admin URL state recovery"
+          files:
+            - "test/admin-url-state.test.ts"
+            - "docs/goals/hive-admin-url-state-recovery/**"
+          note: "URL-state docs and dedicated tests can be checkpointed separately. Shared runtime hunks remain in the first implementation checkpoint because they are interleaved with current deployed UI code."
+        - message: "goalbuddy: prepare Hive checkpoint pagination board"
+          files:
+            - "docs/goals/hive-checkpoint-pagination/**"
+          note: "Commit the new board after checkpoint verification so the next pagination Worker has durable instructions."
+      pre_commit_verification:
+        - "git status --short --branch --untracked-files=all"
+        - "npm test"
+        - "npm run typecheck"
+        - "npm run lint"
+        - "node --check public/admin/app.js"
+        - "git diff --check"
+        - "Inspect staged diff before each commit."
+        - "git push origin main"
+      stop_conditions:
+        - "Do not stage files outside the listed groups."
+        - "Do not stage secret-bearing local deploy config or generated logs."
+        - "Stop if verification fails twice for the same reason."
+        - "Stop if push is rejected for non-fast-forward or auth."
+      board_changes:
+        - "T002 should use this revised commit grouping instead of attempting unsafe hunk-level history reconstruction."
+      summary: "Approved checkpointing with a safety revision. The user-requested split is preserved for separable docs/tests/board artifacts, while cumulative deployed runtime hunks are committed together to protect deployed behavior."
+
+  - id: T002
+    type: worker
+    assignee: Worker
+    status: active
+    reasoning_hint: medium
+    objective: "Commit and push the current deployed Hive work using the grouping approved by T001."
+    allowed_files:
+      - "README.md"
+      - "public/admin/app.js"
+      - "public/admin/index.html"
+      - "public/admin/styles.css"
+      - "src/index.ts"
+      - "test/ingest.test.ts"
+      - "test/admin-url-state.test.ts"
+      - "wrangler.toml"
+      - "migrations/0005_normalized_inventory.sql"
+      - "docs/goals/hive-normalized-inventory/**"
+      - "docs/goals/hive-inventory-summary-view/**"
+      - "docs/goals/hive-inventory-grouping-preference/**"
+      - "docs/goals/hive-admin-url-state-recovery/**"
+      - "docs/goals/hive-checkpoint-pagination/state.yaml"
+      - "docs/goals/hive-checkpoint-pagination/notes/**"
+    verify:
+      - "git status --short --branch --untracked-files=all"
+      - "npm test"
+      - "npm run typecheck"
+      - "npm run lint"
+      - "node --check public/admin/app.js"
+      - "git diff --check"
+      - "Inspect staged diff before each commit"
+      - "git push origin main"
+    stop_if:
+      - "Need to stage or edit files outside allowed_files."
+      - "A staged diff contains secrets, local deployment credentials, raw device IDs, raw payloads, hostnames, usernames, SIDs, full local paths, object keys, HMAC material, summary_json, or live package names."
+      - "A goal split cannot be made without behavior-changing edits."
+      - "Verification fails twice for the same reason."
+      - "Remote push is rejected for non-fast-forward or auth reasons."
+    receipt: null
+
+  - id: T003
+    type: worker
+    assignee: Worker
+    status: queued
+    reasoning_hint: medium
+    objective: "Implement exact numbered pagination for Hive admin API metadata, admin UI controls, and recoverable URL state."
+    allowed_files:
+      - "README.md"
+      - "public/admin/app.js"
+      - "public/admin/index.html"
+      - "public/admin/styles.css"
+      - "src/index.ts"
+      - "test/ingest.test.ts"
+      - "test/admin-url-state.test.ts"
+      - "docs/goals/hive-checkpoint-pagination/state.yaml"
+      - "docs/goals/hive-checkpoint-pagination/notes/**"
+    verify:
+      - "npm test"
+      - "npm run typecheck"
+      - "npm run lint"
+      - "node --check public/admin/app.js"
+      - "npx wrangler deploy --config wrangler.toml --dry-run"
+      - "npx wrangler deploy --config wrangler.deploy.toml --dry-run"
+      - "git diff --check"
+      - "GoalBuddy state checker"
+    stop_if:
+      - "Need schema changes, destructive migrations, or production data deletion."
+      - "Need to weaken Access, UI admin authorization, or /v1/admin token requirements."
+      - "Need to expose raw inventory, raw payloads, raw device IDs, hostnames, usernames, SIDs, full paths, object keys, secrets, HMAC material, summary_json, or live package names."
+      - "Need files outside allowed_files."
+      - "Verification fails twice for the same reason."
+    receipt: null
+
+  - id: T004
+    type: worker
+    assignee: Worker
+    status: queued
+    reasoning_hint: medium
+    objective: "Deploy and smoke-test the pagination package if T003 changes production behavior and deploy credentials are available."
+    allowed_files:
+      - "docs/goals/hive-checkpoint-pagination/state.yaml"
+      - "docs/goals/hive-checkpoint-pagination/notes/**"
+    verify:
+      - "npx wrangler deploy --config wrangler.deploy.toml"
+      - "Redacted live smoke for paginated devices, runs, inventory, and selected-device package endpoints"
+      - "Redacted live smoke for admin shell and pagination URL markers"
+      - "GoalBuddy state checker"
+    stop_if:
+      - "Deploy credentials are unavailable."
+      - "Need live smoke output that exposes raw inventory, raw payloads, raw device IDs, live package names, hostnames, usernames, SIDs, full paths, object keys, secrets, HMAC material, or summary_json."
+      - "Production route, Access, or admin-token behavior regresses."
+      - "Verification fails twice for the same reason."
+    receipt: null
+
+  - id: T999
+    type: judge
+    assignee: Judge
+    status: queued
+    reasoning_hint: high
+    objective: "Audit whether the checkpoint plus pagination tranche is complete and safe."
+    inputs:
+      - "All done task receipts"
+      - "Last verification"
+      - "Current git status"
+      - "Current dirty diff"
+    constraints:
+      - "Read-only."
+      - "Reject completion if required Worker work remains queued or active."
+      - "Reject completion if checkpoint commits are not pushed."
+      - "Reject completion if pagination is not exact numbered pagination across devices, runs, inventory, and selected-device packages."
+      - "Reject completion if URL state does not recover pagination state."
+      - "Reject completion if forbidden fields or secrets appear in code, docs, tests, receipts, or smoke output."
+    expected_output:
+      - "complete | not_complete"
+      - "full_outcome_complete: true | false"
+      - "verification evidence"
+      - "missing evidence"
+      - "next task if not complete"
+    receipt: null
+
+checks:
+  dirty_fingerprint: unknown
+  last_verification:
+    result: pending
+    task: null
+    commands: []
