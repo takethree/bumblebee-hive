@@ -217,6 +217,26 @@ function Get-NormalizationVisibility {
   }
 }
 
+function Get-AttentionVisibility {
+  param(
+    [System.Net.Http.HttpClient]$Client,
+    [object]$Config
+  )
+  $response = Invoke-HiveAdmin -Client $Client -HiveBaseUrl ([string]$Config.hive_base_url) -Path "/v1/admin/attention?limit=5&offset=0"
+  $attention = @(Get-JsonProperty -Object $response.body -Name "attention")
+  $counts = Get-JsonProperty -Object $response.body -Name "counts"
+  [pscustomobject]@{
+    status_code = $response.status_code
+    cache_control = $response.cache_control
+    forbidden_matches = @(Test-ForbiddenFields -Body $response.body_text)
+    total = if ($null -ne (Get-JsonProperty -Object $response.body -Name "total")) { [int](Get-JsonProperty -Object $response.body -Name "total") } else { 0 }
+    returned = $attention.Count
+    count_total = if ($null -ne (Get-JsonProperty -Object $counts -Name "total")) { [int](Get-JsonProperty -Object $counts -Name "total") } else { 0 }
+    critical_count = if ($null -ne (Get-JsonProperty -Object $counts -Name "critical")) { [int](Get-JsonProperty -Object $counts -Name "critical") } else { 0 }
+    warning_count = if ($null -ne (Get-JsonProperty -Object $counts -Name "warning")) { [int](Get-JsonProperty -Object $counts -Name "warning") } else { 0 }
+  }
+}
+
 function Get-DeviceDetailVisibility {
   param(
     [System.Net.Http.HttpClient]$Client,
@@ -318,6 +338,7 @@ $client = $null
 $config = $null
 $adminAssets = $null
 $routePosture = $null
+$attentionVisibility = $null
 $normalizationVisibility = $null
 $deviceDetailVisibility = $null
 $freshNormalization = $null
@@ -379,7 +400,7 @@ try {
 
   $client = New-HiveClient -AdminSecrets $adminSecrets
   $adminResponses = @()
-  foreach ($adminPath in @("/v1/admin/overview", "/v1/admin/devices?status=all&limit=5&offset=0", "/v1/admin/runs?limit=5&offset=0")) {
+  foreach ($adminPath in @("/v1/admin/overview", "/v1/admin/attention?limit=5&offset=0", "/v1/admin/devices?status=all&limit=5&offset=0", "/v1/admin/runs?limit=5&offset=0")) {
     $response = Invoke-HiveAdmin -Client $client -HiveBaseUrl ([string]$config.hive_base_url) -Path $adminPath
     $matches = @(Test-ForbiddenFields -Body $response.body_text)
     $adminResponses += [pscustomobject]@{
@@ -405,11 +426,16 @@ try {
     page_status_code = $adminPage.status_code
     page_has_title = $adminPage.body_text -like "*Bumblebee Hive Admin*"
     script_status_code = $adminScript.status_code
+    script_has_attention_route = $adminScript.body_text -like "*/v1/ui/admin/attention*"
+    script_has_attention_loader = $adminScript.body_text -like "*loadAttention*"
     script_has_normalization_route = $adminScript.body_text -like "*/v1/ui/admin/normalization-jobs*"
     script_has_normalization_loader = $adminScript.body_text -like "*loadNormalizationJobs*"
   }
   if ($adminAssets.page_status_code -ne 200 -or -not $adminAssets.page_has_title) {
     Add-Failure -Failures $failures -Code "admin_page_unavailable"
+  }
+  if ($adminAssets.script_status_code -ne 200 -or -not $adminAssets.script_has_attention_route -or -not $adminAssets.script_has_attention_loader) {
+    Add-Failure -Failures $failures -Code "admin_script_attention_missing"
   }
   if ($adminAssets.script_status_code -ne 200 -or -not $adminAssets.script_has_normalization_route -or -not $adminAssets.script_has_normalization_loader) {
     Add-Failure -Failures $failures -Code "admin_script_normalization_missing"
@@ -440,6 +466,17 @@ try {
       workers_dev_checked = $false
       workers_dev_disabled = $null
     }
+  }
+
+  $attentionVisibility = Get-AttentionVisibility -Client $client -Config $config
+  if ($attentionVisibility.status_code -ne 200) {
+    Add-Failure -Failures $failures -Code "attention_endpoint_failed"
+  }
+  if ($attentionVisibility.cache_control -ne "no-store") {
+    Add-Failure -Failures $failures -Code "attention_endpoint_cache_control"
+  }
+  if ($attentionVisibility.forbidden_matches.Count -gt 0) {
+    Add-Failure -Failures $failures -Code "attention_endpoint_forbidden_fields"
   }
 
   $normalizationVisibility = Get-NormalizationVisibility -Client $client -Config $config
@@ -527,6 +564,20 @@ try {
     admin_endpoints = @($adminResponses)
     admin_assets = $adminAssets
     route_posture = $routePosture
+    attention_visibility = if ($null -ne $attentionVisibility) {
+      [ordered]@{
+        status_code = $attentionVisibility.status_code
+        cache_control = $attentionVisibility.cache_control
+        total = $attentionVisibility.total
+        returned = $attentionVisibility.returned
+        count_total = $attentionVisibility.count_total
+        critical_count = $attentionVisibility.critical_count
+        warning_count = $attentionVisibility.warning_count
+        forbidden_match_count = $attentionVisibility.forbidden_matches.Count
+      }
+    } else {
+      $null
+    }
     normalization_visibility = if ($null -ne $normalizationVisibility) {
       [ordered]@{
         status_code = $normalizationVisibility.status_code
