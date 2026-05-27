@@ -227,3 +227,73 @@ These endpoints intentionally do not expose raw inventory records, `summary_json
 R2 object keys, body hashes, HMAC key material, Access credentials, local user
 names, SIDs, hostnames, or profile paths. Use R2/D1 operator tooling separately
 for break-glass forensic access to raw batches.
+
+## Pilot Verification
+
+Use `scripts\verify-bumblebee-pilot.ps1` on a pilot Windows host after the
+bootstrapper has installed Bumblebee, enrolled Hive, and registered the scheduled
+task. The verifier reads the local Bumblebee config, decrypts only the local
+DPAPI-protected secrets needed for the check, calls Hive admin metadata
+endpoints, and emits redacted JSON.
+
+The verifier intentionally does not print secrets, raw inventory, raw HTTP
+payloads, raw device IDs, usernames, SIDs, hostnames, full profile paths, R2
+object keys, or `summary_json`.
+
+Check local state and Hive admin visibility without sending inventory:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass `
+  -File .\scripts\verify-bumblebee-pilot.ps1 `
+  -Mode CheckOnly `
+  -InstallRoot "$env:LOCALAPPDATA\Programs\Bumblebee" `
+  -ConfigRoot "$env:APPDATA\Bumblebee" `
+  -TaskName "Bumblebee Baseline Pilot" `
+  -AdminSecretsPath ".local\deployment-secrets.clixml"
+```
+
+Run the wrapper directly and wait for a fresh completed Hive run:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass `
+  -File .\scripts\verify-bumblebee-pilot.ps1 `
+  -Mode Direct `
+  -WaitSeconds 180
+```
+
+Trigger the scheduled task and wait for a fresh completed Hive run:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass `
+  -File .\scripts\verify-bumblebee-pilot.ps1 `
+  -Mode Scheduled `
+  -WaitSeconds 240
+```
+
+A successful `CheckOnly` result proves:
+
+- local config, local DPAPI secrets, wrapper script, and binary are present;
+- `bumblebee.exe selftest` exits `0`;
+- the scheduled task exists and its last result is `0`;
+- Hive admin overview, device, and run metadata endpoints return `200`;
+- admin responses use `Cache-Control: no-store`;
+- forbidden raw-data fields are absent from admin responses.
+
+A successful `Direct` or `Scheduled` result additionally proves that a fresh
+`complete` run for the configured device/profile appeared in Hive after the
+trigger. The verifier uses the configured raw device ID only as an internal
+query filter and does not print it.
+
+If verification fails:
+
+- `missing_config`, `local_secrets_present`, or `run_script_present` failures
+  usually mean the bootstrapper did not finish or was run with different roots.
+- `selftest_failed` means the installed Bumblebee binary should be repaired
+  before debugging Hive.
+- `admin_endpoint_failed_*` usually means Cloudflare Access service auth,
+  `ADMIN_TOKEN`, or the Hive deployment is not configured for this operator.
+- `scheduled_task_failed` or `scheduled_task_timeout` means inspect the Windows
+  scheduled task history and wrapper exit code on the host.
+- `fresh_hive_run_not_observed` means the local run completed but Hive did not
+  expose a newer completed run before the timeout; check Access/HMAC ingest,
+  Worker logs, and D1 run rows.
