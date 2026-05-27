@@ -1,0 +1,288 @@
+# GoalBuddy v2 state.yaml
+# Board truth lives here. goal.md is the editable charter; notes/ holds long receipts only.
+
+version: 2
+
+goal:
+  title: "Hive Admin URL State Recovery"
+  slug: "hive-admin-url-state-recovery"
+  kind: existing_plan
+  tranche: "Make Hive admin UI device selection and key filters recoverable through path routes and query params."
+  status: done
+  oracle:
+    signal: "Direct navigation to /admin/devices/<device-id>?inventory_view=package&profile=baseline opens the admin shell, restores the selected device, applies filters, and Back/Forward keeps URL and UI state aligned."
+    cadence: "after each Worker package and at final audit"
+    final_proof: "Passing tests/typecheck/lint, Wrangler dry-runs, docs, data-minimization checks, and redacted live smoke for /admin/, /admin/devices/<redacted>, real admin assets, and selected UI API calls."
+  intake:
+    original_request: "$goalbuddy:goal-prep after the admin URL state recovery plan."
+    interpreted_outcome: "Prepare a board to implement recoverable URL routing for the Hive admin UI, focused on device selection plus key filters."
+    input_shape: existing_plan
+    audience: "Hive operators and maintainers."
+    authority: approved
+    proof_type: test
+    completion_proof: "Device path routes serve the admin shell, UI hydrates selected device and filters from URL, UI interactions update URL state, Back/Forward works, assets/API routes remain intact, and verification proves no forbidden fields leak."
+    likely_misfire: "Only push URLs on click without supporting direct load/hydration, Back/Forward, or Worker shell fallback for /admin/devices/<id>."
+    blind_spots_considered:
+      - "Path routes require Worker asset fallback work; query-param-only routing was rejected."
+      - "Auto-refresh should remain local state and not clutter URLs."
+      - "Filter typing should use replaceState rather than pushState to avoid noisy browser history."
+      - "URL-provided inventory_view should override localStorage when present."
+      - "Real admin assets must continue to serve as assets, not the HTML shell."
+    existing_plan_facts:
+      - "Use /admin/ for dashboard."
+      - "Use /admin/devices/<device-id> for selected device context."
+      - "Preserve query params: device_status, inventory_view, package_query, ecosystem, profile, run_status, run_profile."
+      - "Use pushState for selecting/clearing devices."
+      - "Use replaceState for filter/grouping changes."
+      - "Handle popstate for Back/Forward."
+      - "Keep localStorage only as inventory_view fallback/default."
+
+rules:
+  pm_owns_state: true
+  one_active_task: true
+  max_write_workers: 1
+  no_implementation_without_worker_or_pm_task: true
+  no_completion_without_judge_or_pm_audit: true
+  planning_is_not_completion: true
+  queued_required_worker_blocks_completion: true
+  continuous_until_full_outcome: true
+  missing_input_or_credentials_do_not_stop_goal: true
+  preserve_and_validate_existing_plan: true
+  intake_misfire_must_be_audited: true
+  goal_pressure_requires_oracle: true
+  no_completion_on_weak_proof: true
+  slice_policy:
+    max_consecutive_tiny_tasks: 2
+    prefer_vertical_slices: true
+    judge_picks_largest_safe_slice: true
+    worker_completes_whole_slice: true
+
+agents:
+  scout: bundled_not_installed
+  worker: bundled_not_installed
+  judge: bundled_not_installed
+
+visual_board:
+  selected: local
+  local:
+    status: blocked
+    url: "http://goalbuddy.localhost:41737/hive-admin-url-state-recovery/"
+    command: "npx goalbuddy board docs/goals/hive-admin-url-state-recovery"
+    error: "Local board was not started during prep because npx goalbuddy board failed while fetching the GoalBuddy catalog with HTTP 404. File-backed board remains usable."
+
+active_task: null
+
+tasks:
+  - id: T001
+    type: judge
+    assignee: Judge
+    status: done
+    reasoning_hint: high
+    objective: "Validate the URL state recovery plan against the current uncommitted Hive admin implementation, then choose the largest safe Worker package."
+    inputs:
+      - "docs/goals/hive-admin-url-state-recovery/goal.md"
+      - "docs/goals/hive-admin-url-state-recovery/state.yaml"
+      - "Current Hive repo, including uncommitted normalized-inventory, summary-view, and grouping-preference changes"
+      - "Approved plan from chat"
+      - "Previous completed board docs/goals/hive-inventory-grouping-preference/state.yaml"
+    constraints:
+      - "Read-only."
+      - "Do not implement."
+      - "Do not print raw payloads, live device IDs, package names from live data, hostnames, usernames, SIDs, source paths, project paths, object keys, secrets, HMAC material, or summary_json."
+      - "Reject any approach that breaks real admin assets or /v1 admin routes."
+      - "Reject query-param-only device routing; the user selected path routes."
+    expected_output:
+      - "Decision: approve | revise | block"
+      - "Current-state facts that materially affect implementation"
+      - "Exact first Worker objective"
+      - "allowed_files"
+      - "verify"
+      - "stop_if"
+      - "Any task replacements needed before Worker execution"
+    receipt:
+      result: done
+      decision: approve
+      current_state_facts:
+        - "The Worker currently routes every GET path beginning with /admin/ through serveAdminAsset, so /admin/devices/<device-id> is not guaranteed to serve the admin shell."
+        - "The admin HTML uses absolute /admin/styles.css and /admin/app.js asset paths, so shell fallback for path routes can safely reuse /admin/."
+        - "The current admin UI stores selectedDeviceId only in memory and inventory grouping fallback in localStorage; URL state is not parsed or written."
+        - "Existing device, health, and package rows already call loadDeviceDetail, which is the right interception point for pushState."
+        - "No schema migration, data deletion, or Bumblebee scanner change is needed."
+      exact_first_worker_objective: "Implement the full local URL-state recovery package: Worker shell fallback for /admin/devices/<device-id>, client-side URL parse/hydration, pushState/replaceState URL sync for device and filters, popstate recovery, README updates, and tests proving shell fallback plus URL-state helpers."
+      allowed_files:
+        - "src/index.ts"
+        - "test/ingest.test.ts"
+        - "test/admin-url-state.test.ts"
+        - "public/admin/app.js"
+        - "README.md"
+        - "docs/goals/hive-admin-url-state-recovery/state.yaml"
+        - "docs/goals/hive-admin-url-state-recovery/notes"
+      verify:
+        - "npm test"
+        - "npm run typecheck"
+        - "npm run lint"
+        - "node --check public/admin/app.js"
+        - "npx wrangler deploy --config wrangler.toml --dry-run"
+        - "npx wrangler deploy --config wrangler.deploy.toml --dry-run"
+        - "git diff --check"
+        - "GoalBuddy state checker"
+      stop_if:
+        - "Need files outside allowed_files."
+        - "Need to expose raw payloads, live package names in receipts, hostnames, usernames, SIDs, full source paths, project paths, object keys, secrets, HMAC material, or summary_json."
+        - "Need to change Bumblebee scanner output semantics."
+        - "Need destructive migration or data deletion."
+        - "Need to break /admin/ or real admin asset routes."
+        - "Verification fails twice for the same reason."
+      summary: "Approved the plan as one local vertical slice. The Worker and UI can support path-based device recovery without schema or scanner changes."
+
+  - id: T002
+    type: worker
+    assignee: Worker
+    status: done
+    reasoning_hint: medium
+    objective: "Execute the first URL state recovery implementation package selected by Judge."
+    allowed_files:
+      - "src/index.ts"
+      - "test/ingest.test.ts"
+      - "test/admin-url-state.test.ts"
+      - "public/admin/app.js"
+      - "README.md"
+      - "docs/goals/hive-admin-url-state-recovery/state.yaml"
+      - "docs/goals/hive-admin-url-state-recovery/notes"
+    verify:
+      - "npm test"
+      - "npm run typecheck"
+      - "npm run lint"
+      - "node --check public/admin/app.js"
+      - "npx wrangler deploy --config wrangler.toml --dry-run"
+      - "npx wrangler deploy --config wrangler.deploy.toml --dry-run"
+      - "git diff --check"
+      - "GoalBuddy state checker"
+    stop_if:
+      - "Need files outside allowed_files."
+      - "Need to expose raw payloads, live package names in receipts, hostnames, usernames, SIDs, full source paths, project paths, object keys, secrets, HMAC material, or summary_json."
+      - "Need to change Bumblebee scanner output semantics."
+      - "Need destructive migration or data deletion."
+      - "Need to break /admin/ or real admin asset routes."
+      - "Verification fails twice for the same reason."
+    receipt:
+      result: done
+      changed_files:
+        - "src/index.ts"
+        - "test/ingest.test.ts"
+        - "test/admin-url-state.test.ts"
+        - "public/admin/app.js"
+        - "README.md"
+        - "docs/goals/hive-admin-url-state-recovery/state.yaml"
+      commands:
+        - cmd: "npm test"
+          status: pass
+          note: "39 tests passed."
+        - cmd: "npm run typecheck"
+          status: pass
+        - cmd: "npm run lint"
+          status: pass
+        - cmd: "node --check public/admin/app.js"
+          status: pass
+        - cmd: "npx wrangler deploy --config wrangler.toml --dry-run"
+          status: pass
+        - cmd: "npx wrangler deploy --config wrangler.deploy.toml --dry-run"
+          status: pass
+        - cmd: "git diff --check"
+          status: pass
+          note: "Only CRLF conversion warnings."
+        - cmd: "GoalBuddy state checker"
+          status: pass
+      summary: "Implemented the local URL-state recovery package. Worker admin shell fallback now supports /admin/devices/<device-id> while preserving real assets; the admin UI hydrates selected device and filters from URL, updates device routes with pushState, updates filter query params with replaceState, handles popstate, and documents recoverable admin URLs."
+
+  - id: T003
+    type: worker
+    assignee: Worker
+    status: done
+    reasoning_hint: medium
+    objective: "Deploy and smoke the URL state recovery package if T002 changes production behavior."
+    allowed_files:
+      - "docs/goals/hive-admin-url-state-recovery/state.yaml"
+      - "docs/goals/hive-admin-url-state-recovery/notes"
+    verify:
+      - "npx wrangler deploy --config wrangler.deploy.toml"
+      - "Redacted live smoke for /admin/, /admin/devices/<redacted>, /admin/app.js, /admin/styles.css, and selected UI API calls when credentials are available"
+      - "GoalBuddy state checker"
+    stop_if:
+      - "Need files outside allowed_files."
+      - "Need live smoke output that exposes raw payloads, live device IDs, package names, hostnames, usernames, SIDs, full source paths, project paths, object keys, secrets, HMAC material, or summary_json."
+      - "Need destructive migration or data deletion."
+      - "Verification fails twice for the same reason."
+    receipt:
+      result: done
+      changed_files:
+        - "docs/goals/hive-admin-url-state-recovery/state.yaml"
+      commands:
+        - cmd: "npx wrangler deploy --config wrangler.deploy.toml"
+          status: pass
+          note: "Worker version bdc9e944-2367-4624-8496-64fd0df413a3; output confirmed schedule plus queue producer and consumer triggers."
+        - cmd: "Redacted live URL-state smoke"
+          status: pass
+          note: "/admin/ returned 200 HTML; /admin/devices/<redacted>?inventory_view=package&profile=<redacted> returned 200 HTML shell; /admin/app.js returned 200 and contained deviceIdFromPath/pushState/popstate/inventory_view markers; /admin/styles.css returned 200 stylesheet; selected UI/admin endpoints returned 200 with zero forbidden field matches."
+      summary: "Deployed the URL-state recovery bundle and proved direct device path shell fallback, real asset serving, URL-state client markers, and selected API routes with redacted aggregate evidence."
+
+  - id: T999
+    type: judge
+    assignee: Judge
+    status: done
+    reasoning_hint: high
+    objective: "Audit whether the admin URL state recovery tranche is complete and safe."
+    inputs:
+      - "All done task receipts"
+      - "Last verification"
+      - "Current dirty diff"
+      - "Current Hive repo status"
+    constraints:
+      - "Do not implement."
+      - "Reject completion if required Worker work is still queued or active."
+      - "Reject completion if /admin/devices/<device-id> does not serve the admin shell."
+      - "Reject completion if UI does not hydrate selected device and filters from URL."
+      - "Reject completion if Back/Forward recovery is untested."
+      - "Reject completion if real admin assets or /v1 routes regress."
+      - "Reject completion if responses or receipts expose forbidden raw, path, identity, or secret fields."
+    expected_output:
+      - "complete | not_complete"
+      - "full_outcome_complete: true | false"
+      - "verification evidence"
+      - "missing evidence"
+      - "next task if not complete"
+    receipt:
+      result: done
+      decision: complete
+      full_outcome_complete: true
+      verification_evidence:
+        - "Worker admin shell fallback serves /admin/devices/<device-id> through the admin shell while preserving /admin/, /admin/app.js, and /admin/styles.css asset behavior."
+        - "Admin UI parses selected device and filters from the URL path/query on load."
+        - "Admin UI updates device selection and clear actions through pushState."
+        - "Admin UI updates device_status, inventory_view, package_query, ecosystem, profile, run_status, and run_profile query params through replaceState for filter changes."
+        - "Admin UI handles popstate to restore Back/Forward device and filter state."
+        - "URL-provided inventory_view overrides the localStorage fallback/default."
+        - "README documents recoverable device URLs and preserved query parameters."
+        - "Tests cover shell fallback for /admin/devices/<device-id>, real admin asset preservation, URL hydration, pushState, replaceState, and popstate restore behavior."
+        - "npm test, npm run typecheck, npm run lint, node --check public/admin/app.js, both Wrangler dry-runs, git diff --check, and GoalBuddy state checker passed."
+        - "Worker deploy succeeded as version bdc9e944-2367-4624-8496-64fd0df413a3."
+        - "Redacted live smoke proved /admin/ and /admin/devices/<redacted> return 200 HTML shell, /admin/app.js and /admin/styles.css remain real assets, selected UI/admin endpoints return 200, and forbidden field counts are zero."
+      missing_evidence: []
+      summary: "The admin URL state recovery tranche is complete. Hive admin device selection and key filters are now recoverable via path/query URLs, browser Back/Forward is handled, real assets and APIs remain intact, and local plus live proof passed without forbidden field exposure."
+
+checks:
+  dirty_fingerprint: unknown
+  last_verification:
+    result: pass
+    task: T999
+    commands:
+      - "npm test"
+      - "npm run typecheck"
+      - "npm run lint"
+      - "node --check public/admin/app.js"
+      - "npx wrangler deploy --config wrangler.toml --dry-run"
+      - "npx wrangler deploy --config wrangler.deploy.toml --dry-run"
+      - "npx wrangler deploy --config wrangler.deploy.toml"
+      - "Redacted live URL-state smoke"
+      - "git diff --check"
+      - "GoalBuddy state checker"
