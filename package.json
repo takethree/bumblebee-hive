@@ -2,8 +2,17 @@
   "name": "bumblebee-hive",
   "version": "0.1.0",
   "private": true,
+  "license": "Apache-2.0",
   "type": "module",
   "description": "Cloudflare Worker receiver for Bumblebee inventory transport data.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/bradmb/bumblebee-hive.git"
+  },
+  "bugs": {
+    "url": "https://github.com/bradmb/bumblebee-hive/issues"
+  },
+  "homepage": "https://github.com/bradmb/bumblebee-hive#readme",
   "scripts": {
     "build": "tsc --noEmit",
     "typecheck": "tsc --noEmit",

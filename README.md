@@ -1,21 +1,54 @@
 # Bumblebee Hive
 
-Bumblebee Hive is a Cloudflare Worker receiver for Bumblebee inventory transport data.
+Bumblebee Hive is a Cloudflare Worker receiver and operator console for
+Bumblebee inventory transport data.
 
-The v0.1 receiver is intentionally small:
+It answers the deployment-side question for Bumblebee: once developer
+endpoints collect read-only package, extension, developer-tool, and exposure
+metadata, where can those signed batches go, how can operators see the current
+state, and how can enrolled devices refresh the exposure catalog from one
+central source?
 
-- protects `/v1/enroll` and `/v1/ingest` with Cloudflare Access service-token headers;
-- accepts the Cloudflare Access JWT forwarded to the Worker after Access
-  authenticates the request;
-- verifies Bumblebee HMAC signatures against the exact raw request body;
-- decompresses gzip only after HMAC verification;
-- stores accepted raw batches in R2;
-- stores device, batch, and run indexes in D1;
-- queues accepted batches for later normalization.
+Hive is designed to run in an operator-owned Cloudflare account. Developer
+machines do not need object-storage, database, or admin credentials.
 
-It is designed to run in an operator-owned Cloudflare account. It does not require developer machines to hold object-storage credentials.
+## Scope
 
-## Local Development
+- Cloudflare Worker app for Bumblebee enrollment, ingest, catalog sync, and
+  operator metadata views.
+- Cloudflare Access service-token protection for device enrollment, ingest,
+  admin scripts, and catalog reads.
+- Per-device HMAC keys for payload integrity; gzip is decompressed only after
+  HMAC verification against the exact raw request body.
+- R2 storage for accepted raw batches and D1 storage for device, run, batch,
+  normalized inventory, finding, catalog, lifecycle, and operator metadata.
+- Queue-backed normalization from raw batches into queryable metadata tables.
+- Metadata-only admin UI at `/admin/`.
+- Windows bootstrapper scripts for per-user Bumblebee enrollment and scheduled
+  `bumblebee hive run`.
+
+Hive is not a SIEM, EDR, identity-management system, raw forensic browser, or
+general device-management platform. Break-glass access to raw R2/D1 data should
+stay outside the normal operator UI.
+
+## Architecture
+
+| Part | Purpose |
+|---|---|
+| `/v1/enroll` | Enroll a Bumblebee device and issue its encrypted HMAC key. |
+| `/v1/ingest` | Accept signed Bumblebee transport batches. |
+| `RAW_BATCHES` R2 bucket | Store accepted raw request bodies. |
+| `DB` D1 database | Store device, run, batch, current inventory, finding, catalog, lifecycle, and admin metadata. |
+| `NORMALIZE_QUEUE` | Normalize accepted batches asynchronously. |
+| `/admin/` | Browser operator dashboard. |
+| `/v1/ui/admin/*` | Browser-safe, Access-authenticated admin metadata routes. |
+| `/v1/admin/*` | Script/operator admin routes guarded by Access plus `X-Hive-Admin-Token`. |
+| `/v1/catalog/current` | Device catalog bundle download endpoint. |
+
+Raw batches remain the source of truth. Normalized D1 tables are the operator
+query surface.
+
+## Quick Start
 
 ```powershell
 npm install
@@ -24,54 +57,39 @@ npm run typecheck
 npm run build
 ```
 
-Create the D1 schema with:
+Create the local D1 schema:
 
 ```powershell
 wrangler d1 migrations apply bumblebee-hive --local
 ```
 
-Production deployment requires real Cloudflare resource IDs and secrets in `wrangler.toml` / Wrangler secrets.
-
-For a sequenced per-user Windows developer pilot, use
+Production deployment requires real Cloudflare resource IDs and secrets in
+`wrangler.toml` and Wrangler secrets. For a sequenced per-user Windows
+developer pilot, use
 [docs/developer-rollout-runbook.md](docs/developer-rollout-runbook.md).
 
-## Admin UI
+## Deploy
 
-Hive serves an operator dashboard at `/admin/`. The dashboard uses
-Cloudflare Access for browser authentication and calls same-origin
-`/v1/ui/admin/*` metadata routes. Browser code does not store or send
-`X-Hive-Admin-Token`; that token remains limited to script/operator API calls
-against `/v1/admin/*`.
+Hive expects these Cloudflare bindings:
 
-Device detail views are recoverable at `/admin/devices/<device-id>`. Package
-drill-down state is recoverable in the same admin route with query parameters
-such as `selected_package`, `selected_ecosystem`, `selected_profile`, and
-`selected_device`. The UI also preserves key filters in query parameters such
-as `device_status`, `attention_severity`, `attention_reason`,
-`finding_severity`, `finding_catalog`, `finding_query`, `finding_ecosystem`,
-`finding_profile`, `finding_device`, `finding_run`, `inventory_view`,
-`package_query`, `ecosystem`, `profile`,
-`run_status`, `run_profile`, `normalization_status`,
-`normalization_promoted`, `normalization_device`, `normalization_run`, and
-`environment`.
-Numbered table pages are recoverable through `device_page`, `attention_page`,
-`findings_page`, `inventory_page`, `run_page`, `normalization_page`, and
-`detail_inventory_page`. The UI defaults to 10 rows per page and lets operators
-choose 10, 25, 50, or 100 rows next to each paginated list. Non-default choices
-are recoverable through `device_page_size`, `attention_page_size`,
-`findings_page_size`, `inventory_page_size`, `run_page_size`,
-`normalization_page_size`, and `detail_inventory_page_size`. Auto-refresh
-remains local browser state and is not encoded in the URL.
+| Binding | Type | Purpose |
+|---|---|---|
+| `DB` | D1 | Metadata and normalized inventory. |
+| `RAW_BATCHES` | R2 | Accepted raw Bumblebee batches. |
+| `NORMALIZE_QUEUE` | Queue | Async batch normalization. |
+| `ASSETS` | Worker assets | Admin UI assets. |
 
-Admin metadata views default to `environment=production` so local smoke tests
-and installer validation devices do not pollute operator views. Operators can
-switch the UI to `test` or `all`, and script callers can pass
-`environment=production|test|all` on admin list, overview, health, attention,
-findings, run, normalization, and package endpoints. Device enrollment accepts
-an optional JSON `environment` value of `production` or `test`; omitted values
-are stored as `production`.
+Core secrets:
 
-Configure these Worker values before using the UI:
+```powershell
+npx wrangler secret put ACCESS_CLIENT_ID
+npx wrangler secret put ACCESS_CLIENT_SECRET
+npx wrangler secret put ENROLLMENT_TOKEN
+npx wrangler secret put HIVE_KEY_ENCRYPTION_KEY
+npx wrangler secret put ADMIN_TOKEN
+```
+
+Admin UI secrets:
 
 ```powershell
 npx wrangler secret put ACCESS_TEAM_DOMAIN
@@ -79,18 +97,10 @@ npx wrangler secret put ACCESS_AUD
 ```
 
 `ACCESS_TEAM_DOMAIN` is the Cloudflare Access team domain, for example
-`example.cloudflareaccess.com`. `ACCESS_AUD` is the application AUD tag for
-the protected Hive application. The UI routes validate the
-`Cf-Access-Jwt-Assertion` header against the Access JWKS before returning
-metadata.
+`example.cloudflareaccess.com`. `ACCESS_AUD` is the application AUD tag for the
+protected Hive application.
 
-The UI shows overview totals, attention, health, exposure findings, devices,
-device detail, runs, and metadata-only device lifecycle events. It does not
-expose raw inventory records, `summary_json`, R2 object keys, HMAC material,
-Access credentials, local usernames, SIDs, hostnames, or profile paths.
-
-Device lifecycle write actions in the UI require an additional Hive-managed
-allowlist after Access login:
+UI lifecycle write actions also require at least one allowlist secret:
 
 ```powershell
 npx wrangler secret put UI_ADMIN_ACTION_EMAILS
@@ -101,12 +111,51 @@ Both values are comma-separated. `UI_ADMIN_ACTION_EMAILS` matches exact email
 addresses and `UI_ADMIN_ACTION_DOMAINS` matches email domains. If neither is
 configured, UI lifecycle write routes return `403`.
 
-### Operator health
+## Device Enrollment And Ingest
 
-The dashboard includes a read-only health view backed by
-`GET /v1/ui/admin/health`. Health is computed from active devices and the latest
-run for one monitored profile. It is generic Worker configuration, not
-deployment-specific code:
+Device enrollment and ingest are protected by Cloudflare Access Service Auth.
+Access authenticates the service-token headers, forwards the Access JWT to the
+Worker, and Hive validates device state before accepting data.
+
+Enrollment creates a device row and returns the local material Bumblebee needs
+for later signed ingest. Ingest verifies the per-device HMAC against the exact
+raw request body, then decompresses gzip if present, stores the accepted raw
+batch in R2, indexes device/run/batch metadata in D1, and queues the batch for
+normalization.
+
+Device enrollment accepts an optional JSON `environment` value of `production`
+or `test`. Omitted values are stored as `production`. Admin metadata views
+default to `environment=production` so local smoke tests and installer
+validation devices do not pollute operator views.
+
+## Admin UI
+
+Hive serves the operator dashboard at `/admin/`. The dashboard uses Cloudflare
+Access browser authentication and calls same-origin `/v1/ui/admin/*` metadata
+routes. Browser code does not store or send `X-Hive-Admin-Token`; that token is
+limited to script/operator API calls against `/v1/admin/*`.
+
+The UI shows overview totals, attention, health, exposure findings, devices,
+device detail, runs, normalized inventory, catalog status, and metadata-only
+device lifecycle events. It does not expose raw inventory records,
+`summary_json`, R2 object keys, HMAC material, Access credentials, local
+usernames, SIDs, hostnames, or profile paths.
+
+Device detail views are recoverable at `/admin/devices/<device-id>`. Filters,
+drill-down state, selected inventory grouping, selected environment, numbered
+pages, and per-list page sizes are encoded in query parameters so operators can
+refresh or share the current view. Auto-refresh remains local browser state.
+
+The UI defaults to 10 rows per paginated list and lets operators choose 10, 25,
+50, or 100 rows next to each list. The environment selector supports
+`production`, `test`, and `all`.
+
+## Operator Workflows
+
+### Health
+
+The dashboard health view is backed by `GET /v1/ui/admin/health`. Health is
+computed from active devices and the latest run for one monitored profile.
 
 | Variable | Default | Meaning |
 |---|---:|---|
@@ -115,31 +164,18 @@ deployment-specific code:
 | `HEALTH_STALE_HOURS` | `24` | Normal stale threshold for the latest complete monitored run. |
 | `HEALTH_WEEKEND_GRACE_HOURS` | `72` | Stale threshold when the interval between latest complete run and now crosses a weekend. Use `0` to disable weekend grace. |
 
-Health statuses:
+Health statuses are `healthy`, `stale`, `attention`, and `unknown`. Disabled
+devices are excluded from health counts.
 
-- `healthy`: latest monitored-profile run is complete and within the active
-  stale threshold.
-- `stale`: latest complete monitored-profile run is older than the active
-  stale threshold.
-- `attention`: latest monitored-profile run exists but is not complete.
-- `unknown`: active device has no monitored-profile run yet.
+### Attention
 
-Disabled devices are excluded from health counts. Health responses contain
-aggregate counts and metadata only; they do not expose raw inventory,
-`summary_json`, R2 object keys, HMAC material, Access credentials, local
-usernames, SIDs, hostnames, or profile paths.
+The dashboard attention queue is backed by `GET /v1/ui/admin/attention`.
+Script/operator callers can use `GET /v1/admin/attention`. The queue is
+computed from active devices, monitored-profile run health, and the latest
+normalization job for the latest complete monitored-profile run.
 
-### Operator attention
-
-The dashboard includes a top read-only attention queue backed by
-`GET /v1/ui/admin/attention`. Script/operator callers can use the matching
-`GET /v1/admin/attention` endpoint. The queue is server-computed from active
-devices, monitored-profile run health, and the latest normalization job for the
-latest complete monitored-profile run.
-
-Attention supports `severity=all|critical|warning`, `reason=<reason>`,
-`limit`, and `offset`. Responses include `config`, `counts`, `attention`,
-pagination metadata, and `filters`.
+Attention supports `severity=all|critical|warning`, `reason=<reason>`, `limit`,
+and `offset`.
 
 | Variable | Default | Meaning |
 |---|---:|---|
@@ -155,30 +191,43 @@ Attention reasons:
 - `normalization_processing_stale`: critical.
 - `normalization_not_promoted`: warning.
 
-Disabled devices are excluded. Attention responses are metadata-only and do not
-expose raw inventory, `summary_json`, R2 object keys, HMAC material, Access
-credentials, local usernames, SIDs, hostnames, or profile paths.
+### Findings
 
-### Operator findings
-
-The dashboard includes a read-only findings view backed by
-`GET /v1/ui/admin/findings`. Script/operator callers can use the matching
-`GET /v1/admin/findings` endpoint. Findings are served from normalized
+The findings view is backed by `GET /v1/ui/admin/findings`. Script/operator
+callers can use `GET /v1/admin/findings`. Findings are served from normalized
 Bumblebee `record_type=finding` data in D1 and default to all historical
 findings, newest first.
 
 Findings support `severity`, `catalog_id`, `ecosystem`, `query`, `device_id`,
-`profile`, `run_id`, `limit`, and `offset`. Responses include `counts`,
-`findings`, pagination metadata, and `filters`.
+`profile`, `run_id`, `limit`, and `offset`.
 
-Finding rows expose only metadata needed for operator triage: device ID, run
-ID, record ID, profile, finding type, severity, catalog ID/name, ecosystem,
-package name, normalized package name, version, root kind, source type,
-confidence, sanitized evidence text, and received time. They do not expose raw
-payloads, `summary_json`, R2 object keys, HMAC material, Access credentials,
-hostnames, usernames, SIDs, `source_file`, `project_path`, or local paths.
+Finding rows expose only operator-triage metadata: device ID, run ID, record
+ID, profile, finding type, severity, catalog ID/name, ecosystem, package name,
+normalized package name, version, root kind, source type, confidence, sanitized
+evidence text, and received time.
 
-## Retention
+### Inventory
+
+Hive normalizes accepted Bumblebee `package` and `finding` records from raw R2
+batches into D1 through the `NORMALIZE_QUEUE` consumer.
+
+Current package state is promoted only after Hive sees a matching
+`scan_summary.status=complete`. `baseline` and `project` runs can promote
+current package state. `deep` runs are kept as evidence and finding data but do
+not retire or replace current inventory.
+
+Package responses default to `view=summary`, grouped by device ID, profile,
+ecosystem, normalized package name, and version. `view=package` groups by
+package family and includes `version_count`, `total_occurrence_count`, source
+category summaries, latest observed time, and `versions[]` details.
+`view=observations` returns the current row-level observations behind a
+summary.
+
+The admin UI defaults to the package-family view and stores the selected
+grouping mode in browser local storage. The script API default remains
+`view=summary` for compatibility.
+
+### Retention
 
 Hive stores accepted raw batches in R2 and metadata in D1. A scheduled Worker
 cleanup runs every 6 hours and removes data older than the configured retention
@@ -209,15 +258,21 @@ Invoke-RestMethod `
   -Headers $headers
 ```
 
-Retention responses contain aggregate counts and the cutoff timestamp only. They
-do not expose raw inventory, `summary_json`, R2 object keys, HMAC material,
-Access credentials, local usernames, SIDs, hostnames, or profile paths.
+### Device Lifecycle And Purge
 
-## Device Purge
+Hive can disable or enable an enrolled device without changing the local
+installer state. Disabled devices are rejected on later ingest because their
+row no longer matches the active-device lookup. Lifecycle actions write
+metadata-only audit events to `device_lifecycle_events`.
 
-Operators can purge a specific test or stale disabled device through a guarded
-admin endpoint. Purge is intended for disposable smoke devices and retired
-endpoints after local uninstall/disable, not routine lifecycle control.
+The admin UI supports disable/enable actions from the device detail panel when
+the operator's Access JWT identity matches `UI_ADMIN_ACTION_EMAILS` or
+`UI_ADMIN_ACTION_DOMAINS`. The UI requires a short reason and confirmation
+before sending the action, and it never sends `X-Hive-Admin-Token`.
+
+Operators can also purge a specific test or stale disabled device through a
+guarded admin endpoint. Purge is intended for disposable smoke devices and
+retired endpoints after local uninstall/disable, not routine lifecycle control.
 
 Dry-run first:
 
@@ -252,16 +307,18 @@ events, runs, batches, normalized inventory, findings, and matching raw R2
 objects. If any raw object delete fails, Hive returns `ok:false` and leaves D1
 metadata in place for a later retry.
 
-Purge responses contain aggregate counts only. They do not expose raw
-inventory, `summary_json`, R2 object keys, HMAC material, Access credentials,
-local usernames, SIDs, hostnames, or profile paths.
+Emergency D1 fallback for disable only:
 
-## Catalog Publishing
+```powershell
+npx wrangler d1 execute bumblebee-hive --remote `
+  --command "UPDATE devices SET disabled_at = datetime('now') WHERE device_id = '<device-id>' AND disabled_at IS NULL;"
+```
+
+### Catalog Publishing
 
 Hive can publish the current Bumblebee exposure catalog to enrolled devices.
-Script/operator callers use `POST /v1/admin/catalog/current` with the existing
-Cloudflare Access Service Auth headers and `X-Hive-Admin-Token`. The request
-body is a JSON object with a source label and one or more JSON catalog files:
+Script/operator callers use `POST /v1/admin/catalog/current` with Cloudflare
+Access Service Auth headers and `X-Hive-Admin-Token`.
 
 ```json
 {
@@ -294,10 +351,10 @@ Invoke-RestMethod `
 Set `CATALOG_UPSTREAM_SYNC_ENABLED=true` to run the same sync from the
 scheduled Worker. By default, Hive reads the public
 `perplexityai/bumblebee/threat_intel` directory through GitHub's repository
-contents API. Operators can override the source with:
+contents API.
 
 | Variable | Default | Purpose |
-| --- | --- | --- |
+|---|---|---|
 | `CATALOG_UPSTREAM_SYNC_ENABLED` | unset | Enables scheduled upstream catalog sync when `true`, `1`, or `yes`. |
 | `CATALOG_UPSTREAM_CONTENTS_URL` | `https://api.github.com/repos/perplexityai/bumblebee/contents/threat_intel?ref=main` | Contents API URL for the upstream catalog directory. |
 | `CATALOG_UPSTREAM_SOURCE` | `perplexityai/bumblebee/threat_intel` | Source label stored on the promoted catalog release. |
@@ -346,9 +403,9 @@ secret after that wave completes:
 npx wrangler secret put ENROLLMENT_TOKEN
 ```
 
-The generated wrapper passes gateway headers through Bumblebee's generic
-Hive config/secrets path and uses Bumblebee HMAC for payload integrity. The
-default generated scan profile is `baseline`; tests and bounded campaign
+The generated wrapper runs `bumblebee hive run` with the configured Hive
+config, secrets, and cache roots. Bumblebee uses HMAC for payload integrity.
+The default generated scan profile is `baseline`; tests and bounded campaign
 installs can pass `-Environment test -ScanProfile project -ScanRoot <path>`.
 The installer reuses an existing local Hive identity by default when rerun.
 
@@ -364,61 +421,85 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-bumblebee.
   -TaskName "Bumblebee Baseline Pilot"
 ```
 
-## Device Lifecycle
+## Pilot Verification
 
-Hive can disable or enable an enrolled device without changing the local
-installer state. Set `ADMIN_TOKEN` as a Worker secret and call the admin
-endpoint through the same Cloudflare Access Service Auth gate used by enroll
-and ingest:
+Use `scripts\verify-bumblebee-pilot.ps1` on a pilot Windows host after the
+bootstrapper has installed Bumblebee, enrolled Hive, and registered the
+scheduled task. The verifier reads local Hive config and `secrets.json`, calls
+Hive admin metadata endpoints, and emits redacted JSON.
 
-```powershell
-Invoke-WebRequest -Method Post `
-  -Uri "https://hive.example.com/v1/admin/devices/<device-id>/disable" `
-  -Headers @{
-    "CF-Access-Client-Id" = $env:BUMBLEBEE_HIVE_ACCESS_CLIENT_ID
-    "CF-Access-Client-Secret" = $env:BUMBLEBEE_HIVE_ACCESS_CLIENT_SECRET
-    "X-Hive-Admin-Token" = $env:BUMBLEBEE_HIVE_ADMIN_TOKEN
-  } `
-  -Body (@{ reason = "developer offboarded" } | ConvertTo-Json) `
-  -ContentType "application/json"
-```
-
-To re-enable the device:
+Check local state and Hive admin visibility without sending inventory:
 
 ```powershell
-Invoke-WebRequest -Method Post `
-  -Uri "https://hive.example.com/v1/admin/devices/<device-id>/enable" `
-  -Headers @{
-    "CF-Access-Client-Id" = $env:BUMBLEBEE_HIVE_ACCESS_CLIENT_ID
-    "CF-Access-Client-Secret" = $env:BUMBLEBEE_HIVE_ACCESS_CLIENT_SECRET
-    "X-Hive-Admin-Token" = $env:BUMBLEBEE_HIVE_ADMIN_TOKEN
-  } `
-  -Body (@{ reason = "mistaken disable" } | ConvertTo-Json) `
-  -ContentType "application/json"
+powershell -NoProfile -ExecutionPolicy Bypass `
+  -File .\scripts\verify-bumblebee-pilot.ps1 `
+  -Mode CheckOnly `
+  -InstallRoot "$env:LOCALAPPDATA\Programs\Bumblebee" `
+  -ConfigRoot "$env:APPDATA\Bumblebee" `
+  -TaskName "Bumblebee Baseline Pilot" `
+  -AdminSecretsPath ".local\deployment-secrets.clixml" `
+  -WorkersDevUrl "https://bumblebee-hive.<account-subdomain>.workers.dev"
 ```
 
-Disabled devices are rejected on later ingest because their row no longer
-matches the active-device lookup. Lifecycle actions write metadata-only audit
-events to `device_lifecycle_events`.
-
-The admin UI supports the same disable/enable actions from the device detail
-panel when the operator's Access JWT identity matches
-`UI_ADMIN_ACTION_EMAILS` or `UI_ADMIN_ACTION_DOMAINS`. The UI requires a short
-reason and confirmation before sending the action, and it never sends
-`X-Hive-Admin-Token`.
-
-Wrangler D1 fallback for emergency disable only:
+Run the wrapper directly and wait for a fresh completed Hive run:
 
 ```powershell
-npx wrangler d1 execute bumblebee-hive --remote `
-  --command "UPDATE devices SET disabled_at = datetime('now') WHERE device_id = '<device-id>' AND disabled_at IS NULL;"
+powershell -NoProfile -ExecutionPolicy Bypass `
+  -File .\scripts\verify-bumblebee-pilot.ps1 `
+  -Mode Direct `
+  -WaitSeconds 180
 ```
 
-## Operator Visibility
+Trigger the scheduled task and wait for a fresh completed Hive run:
 
-Hive exposes metadata-only JSON endpoints for operators. They are protected by
-the same Cloudflare Access gate as ingest and also require `X-Hive-Admin-Token`.
-Responses include `Cache-Control: no-store`.
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass `
+  -File .\scripts\verify-bumblebee-pilot.ps1 `
+  -Mode Scheduled `
+  -WaitSeconds 240 `
+  -WorkersDevUrl "https://bumblebee-hive.<account-subdomain>.workers.dev"
+```
+
+A successful `CheckOnly` result proves local config/secrets, wrapper script,
+cache root, binary, selftest, scheduled task state, admin metadata routes,
+dashboard assets, workers.dev lockout, and forbidden raw-field redaction. A
+successful `Direct` or `Scheduled` result additionally proves that a fresh
+`complete` run and a fresh complete normalization job became visible for the
+same device.
+
+The verifier intentionally does not print secrets, raw inventory, raw HTTP
+payloads, raw device IDs, usernames, SIDs, hostnames, full profile paths, R2
+object keys, or `summary_json`.
+
+<details>
+<summary>Verifier failure hints</summary>
+
+- `missing_config`, `local_hive_secrets_present`, or `run_script_present`
+  usually mean the bootstrapper did not finish or was run with different roots.
+- `run_script_uses_hive_run`, `configured_base_url_present`,
+  `configured_ingest_path`, or `configured_environment` usually mean the host
+  still has legacy direct-ingest installer state or a hand-edited config.
+- `selftest_failed` means the installed Bumblebee binary should be repaired
+  before debugging Hive.
+- `admin_endpoint_failed_*` usually means Cloudflare Access service auth,
+  `ADMIN_TOKEN`, or the Hive deployment is not configured for this operator.
+- `scheduled_task_failed` or `scheduled_task_timeout` means inspect the Windows
+  scheduled task history and wrapper exit code on the host.
+- `fresh_hive_run_not_observed` means the local run completed but Hive did not
+  expose a newer completed run before the timeout; check Access/HMAC ingest,
+  Worker logs, and D1 run rows.
+- `fresh_normalization_not_observed` means ingest completed but the queue
+  consumer did not expose a fresh complete normalization job before the timeout;
+  check Worker queue delivery, consumer logs, and the `normalization_jobs` D1
+  rows.
+
+</details>
+
+## API Reference
+
+Admin script endpoints are protected by the same Cloudflare Access gate as
+ingest and also require `X-Hive-Admin-Token`. Responses include
+`Cache-Control: no-store`.
 
 ```powershell
 $headers = @{
@@ -428,30 +509,40 @@ $headers = @{
 }
 ```
 
-Supported endpoints:
+Supported script/operator endpoints:
 
 - `GET /v1/admin/overview?environment=production|test|all`
 - `GET /v1/admin/attention?environment=production|test|all&severity=all|critical|warning&reason=<reason>&limit=10&offset=0`
 - `GET /v1/admin/findings?environment=production|test|all&severity=critical&catalog_id=<catalog-id>&ecosystem=npm&query=<package>&device_id=<device-id>&profile=baseline&run_id=<run-id>&limit=10&offset=0`
 - `GET /v1/admin/devices?environment=production|test|all&status=active|disabled|all&limit=50&offset=0`
 - `GET /v1/admin/devices/<device-id>`
+- `POST /v1/admin/devices/<device-id>/disable`
+- `POST /v1/admin/devices/<device-id>/enable`
 - `POST /v1/admin/devices/<device-id>/purge?dry_run=true|false`
 - `GET /v1/admin/runs?environment=production|test|all&device_id=<device-id>&status=complete&profile=baseline&limit=50&offset=0`
 - `GET /v1/admin/normalization-jobs?environment=production|test|all&status=complete&device_id=<device-id>&run_id=<run-id>&promoted_current=true&limit=50&offset=0`
 - `GET /v1/admin/packages?environment=production|test|all&query=<name>&ecosystem=npm&profile=baseline&view=package|summary|observations&limit=50&offset=0`
 - `GET /v1/admin/packages/detail?environment=production|test|all&name=<normalized-name>&ecosystem=npm&profile=baseline&device_id=<device-id>`
 - `GET /v1/admin/devices/<device-id>/packages?environment=production|test|all&profile=baseline&view=package|summary|observations&limit=50&offset=0`
+- `POST /v1/admin/retention/run?dry_run=true|false`
+- `POST /v1/admin/catalog/current`
+- `POST /v1/admin/catalog/sync-upstream`
 
 List endpoints return additive pagination metadata alongside existing arrays:
 `limit`, `offset`, `total`, `page`, `page_count`, and `has_more`.
+
+These endpoints intentionally do not expose raw inventory records,
+`summary_json`, R2 object keys, body hashes, HMAC key material, Access
+credentials, local usernames, SIDs, hostnames, or profile paths.
+
+<details>
+<summary>Example admin responses</summary>
 
 Example overview:
 
 ```powershell
 Invoke-RestMethod -Uri "https://hive.example.com/v1/admin/overview" -Headers $headers
 ```
-
-Example response:
 
 ```json
 {
@@ -466,14 +557,6 @@ Example response:
 ```
 
 Example attention queue:
-
-```powershell
-Invoke-RestMethod `
-  -Uri "https://hive.example.com/v1/admin/attention?severity=critical&limit=10&offset=0" `
-  -Headers $headers
-```
-
-Example response:
 
 ```json
 {
@@ -542,14 +625,6 @@ Example response:
 
 Example findings list:
 
-```powershell
-Invoke-RestMethod `
-  -Uri "https://hive.example.com/v1/admin/findings?severity=critical&limit=10&offset=0" `
-  -Headers $headers
-```
-
-Example response:
-
 ```json
 {
   "counts": {
@@ -584,28 +659,11 @@ Example response:
   "total": 1,
   "page": 1,
   "page_count": 1,
-  "has_more": false,
-  "filters": {
-    "severity": "critical",
-    "catalog_id": null,
-    "ecosystem": null,
-    "query": null,
-    "device_id": null,
-    "profile": null,
-    "run_id": null
-  }
+  "has_more": false
 }
 ```
 
 Example active-device list:
-
-```powershell
-Invoke-RestMethod `
-  -Uri "https://hive.example.com/v1/admin/devices?status=active&limit=50&offset=0" `
-  -Headers $headers
-```
-
-Example response:
 
 ```json
 {
@@ -639,216 +697,17 @@ Example response:
 }
 ```
 
-Example run list:
+</details>
 
-```powershell
-Invoke-RestMethod `
-  -Uri "https://hive.example.com/v1/admin/runs?profile=baseline&status=complete" `
-  -Headers $headers
-```
+## Security
 
-Example response:
+Please report vulnerabilities privately through GitHub Security Advisories. See
+[SECURITY.md](SECURITY.md).
 
-```json
-{
-  "runs": [
-    {
-      "device_id": "device-redacted",
-      "run_id": "run-redacted",
-      "profile": "baseline",
-      "status": "complete",
-      "scanner_version": "v0.1.0",
-      "received_at": "2026-05-26T19:45:00.000Z",
-      "batch_count": 1,
-      "record_count": 400
-    }
-  ],
-  "limit": 50,
-  "offset": 0,
-  "total": 32,
-  "page": 1,
-  "page_count": 1,
-  "has_more": false
-}
-```
+## Contributing
 
-Example normalization job list:
+Development and pull-request guidance lives in [CONTRIBUTING.md](CONTRIBUTING.md).
 
-```powershell
-Invoke-RestMethod `
-  -Uri "https://hive.example.com/v1/admin/normalization-jobs?status=error&limit=50&offset=0" `
-  -Headers $headers
-```
+## License
 
-Example response:
-
-```json
-{
-  "normalization_jobs": [
-    {
-      "batch_id": "batch-redacted",
-      "device_id": "device-redacted",
-      "run_id": "run-redacted",
-      "status": "error",
-      "records_seen": 0,
-      "packages_seen": 0,
-      "findings_seen": 0,
-      "promoted_current": false,
-      "error": "[redacted-path]",
-      "started_at": "2026-05-27T10:00:00.000Z",
-      "completed_at": "2026-05-27T10:00:01.000Z"
-    }
-  ],
-  "limit": 50,
-  "offset": 0,
-  "total": 1,
-  "page": 1,
-  "page_count": 1,
-  "has_more": false,
-  "filters": {
-    "status": "error",
-    "device_id": null,
-    "run_id": null,
-    "promoted_current": null
-  }
-}
-```
-
-These endpoints intentionally do not expose raw inventory records, `summary_json`,
-R2 object keys, body hashes, HMAC key material, Access credentials, local user
-names, SIDs, hostnames, or profile paths. Use R2/D1 operator tooling separately
-for break-glass forensic access to raw batches.
-
-## Normalized Inventory
-
-Hive normalizes accepted Bumblebee `package` and `finding` records from raw R2
-batches into D1 through the `NORMALIZE_QUEUE` consumer. Raw batches remain the
-source of truth; normalized tables are the operator query surface.
-
-Normalization job visibility is read-only and metadata-only. It shows job
-status, batch/device/run IDs, record/package/finding counts, whether current
-inventory was promoted, a sanitized error string, and start/complete
-timestamps. It does not expose raw batch content, R2 object keys, local paths,
-retry/replay/delete controls, or queue mutation.
-
-Current package state is promoted only after Hive sees a matching
-`scan_summary.status=complete`. `baseline` and `project` runs can promote
-current package state. `deep` runs are kept as evidence and finding data but do
-not retire or replace current inventory.
-
-Package responses default to `view=summary`, grouped by device ID, profile,
-ecosystem, normalized package name, and version. Summary rows include an
-occurrence count, latest observed time, latest run ID, and unique source
-categories such as package managers, source types, and root kinds.
-`view=package` groups by package family and includes `version_count`,
-`total_occurrence_count`, source category summaries, latest observed time, and
-`versions[]` details for each version. Use `view=observations` when
-troubleshooting needs the current row-level package observations behind a
-summary.
-
-Package drill-down uses exact `name` plus `ecosystem` matching against current
-normalized package state. The detail response includes package summary,
-version summary, affected-device summary, occurrence counts, source categories,
-and latest observed metadata. It is intentionally not a raw observation browser.
-
-The admin UI explicitly defaults to the package-family view and stores the
-operator's selected grouping mode in browser local storage. The API default
-stays `view=summary` for compatibility with script callers.
-The UI shows exact numbered pagination for devices, findings, runs, global
-inventory, and selected-device package inventory. Page changes update the URL with
-recoverable page parameters while filter and per-list page-size changes reset
-the affected table to page one. The browser UI defaults to 10 rows per page;
-script callers can continue to pass explicit `limit` and `offset` values.
-
-Package responses include controlled fields such as ecosystem, package name,
-normalized name, version, source type, package manager, profile, device ID, run
-ID, confidence, and observed time. They do not expose raw payload JSON,
-`summary_json`, R2 object keys, body hashes, HMAC material, hostnames, usernames,
-SIDs, `source_file`, `project_path`, or local profile paths.
-
-## Pilot Verification
-
-Use `scripts\verify-bumblebee-pilot.ps1` on a pilot Windows host after the
-bootstrapper has installed Bumblebee, enrolled Hive, and registered the scheduled
-task. The verifier reads the local Hive compatibility-layer config and local
-`secrets.json`, calls Hive admin metadata endpoints including findings
-visibility for the configured device environment, and emits redacted JSON.
-
-The verifier intentionally does not print secrets, raw inventory, raw HTTP
-payloads, raw device IDs, usernames, SIDs, hostnames, full profile paths, R2
-object keys, or `summary_json`.
-
-Check local state and Hive admin visibility without sending inventory:
-
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass `
-  -File .\scripts\verify-bumblebee-pilot.ps1 `
-  -Mode CheckOnly `
-  -InstallRoot "$env:LOCALAPPDATA\Programs\Bumblebee" `
-  -ConfigRoot "$env:APPDATA\Bumblebee" `
-  -TaskName "Bumblebee Baseline Pilot" `
-  -AdminSecretsPath ".local\deployment-secrets.clixml" `
-  -WorkersDevUrl "https://bumblebee-hive.<account-subdomain>.workers.dev"
-```
-
-Run the wrapper directly and wait for a fresh completed Hive run:
-
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass `
-  -File .\scripts\verify-bumblebee-pilot.ps1 `
-  -Mode Direct `
-  -WaitSeconds 180
-```
-
-Trigger the scheduled task and wait for a fresh completed Hive run:
-
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass `
-  -File .\scripts\verify-bumblebee-pilot.ps1 `
-  -Mode Scheduled `
-  -WaitSeconds 240 `
-  -WorkersDevUrl "https://bumblebee-hive.<account-subdomain>.workers.dev"
-```
-
-A successful `CheckOnly` result proves:
-
-- local Hive config, local Hive secrets, wrapper script, cache root, and binary
-  are present;
-- the wrapper invokes `bumblebee hive run` with explicit config and cache roots;
-- `bumblebee.exe selftest` exits `0`;
-- the scheduled task exists and its last result is `0`;
-- Hive admin overview, attention, device, run, device-detail, and normalization-job
-  metadata endpoints return `200`;
-- admin responses use `Cache-Control: no-store`;
-- `/admin/` serves the dashboard shell and `/admin/app.js` contains the
-  attention and normalization UI routes;
-- when `-WorkersDevUrl` is supplied, the workers.dev route returns `404`;
-- forbidden raw-data fields are absent from admin responses.
-
-A successful `Direct` or `Scheduled` result additionally proves that a fresh
-`complete` run for the configured device/profile appeared in Hive after the
-trigger and that a fresh complete normalization job became visible for the same
-device. The verifier uses the configured raw device ID only as an internal query
-filter and does not print it.
-
-If verification fails:
-
-- `missing_config`, `local_hive_secrets_present`, or `run_script_present` failures
-  usually mean the bootstrapper did not finish or was run with different roots.
-- `run_script_uses_hive_run`, `configured_base_url_present`,
-  `configured_ingest_path`, or `configured_environment` failures usually mean
-  the host still has legacy direct-ingest installer state or a hand-edited
-  config.
-- `selftest_failed` means the installed Bumblebee binary should be repaired
-  before debugging Hive.
-- `admin_endpoint_failed_*` usually means Cloudflare Access service auth,
-  `ADMIN_TOKEN`, or the Hive deployment is not configured for this operator.
-- `scheduled_task_failed` or `scheduled_task_timeout` means inspect the Windows
-  scheduled task history and wrapper exit code on the host.
-- `fresh_hive_run_not_observed` means the local run completed but Hive did not
-  expose a newer completed run before the timeout; check Access/HMAC ingest,
-  Worker logs, and D1 run rows.
-- `fresh_normalization_not_observed` means ingest completed but the queue
-  consumer did not expose a fresh complete normalization job before the timeout;
-  check Worker queue delivery, consumer logs, and the `normalization_jobs` D1
-  rows.
+Apache License 2.0. See [LICENSE](LICENSE).
