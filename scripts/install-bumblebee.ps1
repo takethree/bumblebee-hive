@@ -5,11 +5,14 @@ param(
   [string]$ReleaseBaseUrl,
   [string]$InstallRoot = "$env:ProgramFiles\Bumblebee",
   [string]$ConfigRoot = "$env:ProgramData\Bumblebee",
+  [string]$CacheRoot = "$env:LOCALAPPDATA\Bumblebee\catalog-cache",
   [string]$TaskName = "\Bumblebee\Baseline",
   [int]$IntervalHours = 6,
   [string]$EnrollmentToken,
   [string]$AccessClientId,
   [string]$AccessClientSecret,
+  [ValidateSet("production", "test")]
+  [string]$Environment = "production",
   [switch]$SkipDownload,
   [string]$BumblebeeExePath,
   [switch]$SkipEnroll,
@@ -29,23 +32,6 @@ function Require-Value {
   param([string]$Name, [string]$Value)
   if ([string]::IsNullOrWhiteSpace($Value)) {
     throw "$Name is required"
-  }
-}
-
-function Protect-String {
-  param([string]$Value)
-  ConvertTo-SecureString -String $Value -AsPlainText -Force
-}
-
-function Get-PlainText {
-  param([securestring]$Value)
-  $ptr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($Value)
-  try {
-    [Runtime.InteropServices.Marshal]::PtrToStringBSTR($ptr)
-  } finally {
-    if ($ptr -ne [IntPtr]::Zero) {
-      [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ptr)
-    }
   }
 }
 
@@ -139,6 +125,7 @@ function Uninstall-Bumblebee {
 
   Remove-FileIfPresent -Path (Join-Path $TargetConfigRoot "run-baseline.ps1")
   Remove-FileIfPresent -Path (Join-Path $TargetConfigRoot "secrets.clixml")
+  Remove-FileIfPresent -Path (Join-Path $TargetConfigRoot "secrets.json")
   Remove-FileIfPresent -Path (Join-Path $TargetConfigRoot "config.json")
   Remove-DirectoryIfEmpty -Path $TargetConfigRoot
 
@@ -153,88 +140,86 @@ function Uninstall-Bumblebee {
   } | ConvertTo-Json
 }
 
-function Invoke-HiveEnroll {
+function Invoke-BumblebeeHiveJoin {
   param(
+    [string]$BumblebeeExe,
     [string]$BaseUrl,
-    [string]$Token,
+    [string]$TargetConfigRoot,
+    [string]$TargetCacheRoot,
+    [string]$Profile,
+    [string[]]$Roots,
+    [string]$DeviceEnvironment,
     [string]$ClientId,
-    [string]$ClientSecret
+    [string]$ClientSecret,
+    [string]$Token
   )
 
-  Require-Value -Name "EnrollmentToken" -Value $Token
-  $headers = @{
-    "CF-Access-Client-Id" = $ClientId
-    "CF-Access-Client-Secret" = $ClientSecret
-    "X-Hive-Enroll-Token" = $Token
+  $oldAccessId = [Environment]::GetEnvironmentVariable("BUMBLEBEE_ACCESS_CLIENT_ID", "Process")
+  $oldAccessSecret = [Environment]::GetEnvironmentVariable("BUMBLEBEE_ACCESS_CLIENT_SECRET", "Process")
+  $oldEnrollToken = [Environment]::GetEnvironmentVariable("BUMBLEBEE_ENROLLMENT_TOKEN", "Process")
+  try {
+    [Environment]::SetEnvironmentVariable("BUMBLEBEE_ACCESS_CLIENT_ID", $ClientId, "Process")
+    [Environment]::SetEnvironmentVariable("BUMBLEBEE_ACCESS_CLIENT_SECRET", $ClientSecret, "Process")
+    if (-not [string]::IsNullOrWhiteSpace($Token)) {
+      [Environment]::SetEnvironmentVariable("BUMBLEBEE_ENROLLMENT_TOKEN", $Token, "Process")
+    } else {
+      [Environment]::SetEnvironmentVariable("BUMBLEBEE_ENROLLMENT_TOKEN", $null, "Process")
+    }
+
+    $joinArgs = @(
+      "hive", "join",
+      "--base-url", $BaseUrl.TrimEnd("/"),
+      "--config-dir", $TargetConfigRoot,
+      "--cache-dir", $TargetCacheRoot,
+      "--scan-profile", $Profile,
+      "--environment", $DeviceEnvironment
+    )
+    foreach ($root in @($Roots)) {
+      $joinArgs += @("--root", [string]$root)
+    }
+
+    & $BumblebeeExe @joinArgs
+    if ($LASTEXITCODE -ne 0) {
+      throw "bumblebee hive join failed with exit code $LASTEXITCODE"
+    }
+  } finally {
+    [Environment]::SetEnvironmentVariable("BUMBLEBEE_ACCESS_CLIENT_ID", $oldAccessId, "Process")
+    [Environment]::SetEnvironmentVariable("BUMBLEBEE_ACCESS_CLIENT_SECRET", $oldAccessSecret, "Process")
+    [Environment]::SetEnvironmentVariable("BUMBLEBEE_ENROLLMENT_TOKEN", $oldEnrollToken, "Process")
   }
-  $response = Invoke-WebRequest -UseBasicParsing -Method Post -Uri "$($BaseUrl.TrimEnd('/'))/v1/enroll" -Headers $headers -Body "{}" -ContentType "application/json"
-  $contentType = [string]$response.Headers["Content-Type"]
-  if ($contentType -notmatch "application/json") {
-    throw "Hive enrollment did not return JSON. Check that the Cloudflare Access application has a Service Auth policy for this service token."
-  }
-  $body = $response.Content | ConvertFrom-Json
-  if (-not $body.PSObject.Properties["device_id"] -or -not $body.PSObject.Properties["hmac_key"]) {
-    throw "Hive enrollment response was missing device_id or hmac_key."
-  }
-  if (-not $body.PSObject.Properties["ingest_path"]) {
-    $body | Add-Member -NotePropertyName "ingest_path" -NotePropertyValue "/v1/ingest"
-  }
-  $body
 }
 
 function Write-RunScript {
   param(
-    [string]$Path
+    [string]$Path,
+    [string]$BumblebeeExe,
+    [string]$TargetConfigRoot,
+    [string]$TargetCacheRoot
   )
 
-  @'
+  $template = @'
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
-function Get-PlainText {
-  param([securestring]$Value)
-  $ptr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($Value)
-  try {
-    [Runtime.InteropServices.Marshal]::PtrToStringBSTR($ptr)
-  } finally {
-    if ($ptr -ne [IntPtr]::Zero) {
-      [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ptr)
-    }
-  }
-}
+$bumblebeeExe = '__BUMBLEBEE_EXE__'
+$configRoot = '__CONFIG_ROOT__'
+$cacheRoot = '__CACHE_ROOT__'
 
-$scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
-$config = Get-Content -LiteralPath (Join-Path $scriptRoot "config.json") -Raw | ConvertFrom-Json
-$secrets = Import-Clixml -LiteralPath (Join-Path $scriptRoot "secrets.clixml")
-
-$env:BUMBLEBEE_DEVICE_ID = [string]$config.device_id
-$env:BUMBLEBEE_HMAC_KEY = Get-PlainText $secrets.HmacKey
-$env:BUMBLEBEE_ACCESS_CLIENT_ID = Get-PlainText $secrets.AccessClientId
-$env:BUMBLEBEE_ACCESS_CLIENT_SECRET = Get-PlainText $secrets.AccessClientSecret
-
-$scanArgs = @(
-  "scan",
-  "--profile", [string]$config.scan_profile,
-  "--max-duration", "5m",
-  "--output", "http",
-  "--http-url", [string]$config.ingest_url,
-  "--http-auth", "hmac-sha256",
-  "--http-hmac-key-env", "BUMBLEBEE_HMAC_KEY",
-  "--http-gzip",
-  "--http-header-env", "CF-Access-Client-Id=BUMBLEBEE_ACCESS_CLIENT_ID",
-  "--http-header-env", "CF-Access-Client-Secret=BUMBLEBEE_ACCESS_CLIENT_SECRET",
-  "--http-header-env", "X-Inventory-Device-Id=BUMBLEBEE_DEVICE_ID",
-  "--device-id-env", "BUMBLEBEE_DEVICE_ID"
+$runArgs = @(
+  "hive", "run",
+  "--config-dir", $configRoot,
+  "--cache-dir", $cacheRoot,
+  "--max-duration", "5m"
 )
 
-foreach ($root in @($config.scan_roots)) {
-  $scanArgs += @("--root", [string]$root)
-}
-
-& $config.bumblebee_exe @scanArgs
+& $bumblebeeExe @runArgs
 
 exit $LASTEXITCODE
-'@ | Set-Content -LiteralPath $Path -Encoding UTF8
+'@
+  $content = $template.Replace("__BUMBLEBEE_EXE__", $BumblebeeExe.Replace("'", "''")).
+    Replace("__CONFIG_ROOT__", $TargetConfigRoot.Replace("'", "''")).
+    Replace("__CACHE_ROOT__", $TargetCacheRoot.Replace("'", "''"))
+  $content | Set-Content -LiteralPath $Path -Encoding UTF8
 }
 
 Require-Value -Name "HiveBaseUrl" -Value $HiveBaseUrl
@@ -270,38 +255,45 @@ if ($PSCmdlet.ShouldProcess($InstallRoot, "Install Bumblebee and configure Hive 
       }
     }
 
+    New-Item -ItemType Directory -Force -Path $ConfigRoot | Out-Null
+    New-Item -ItemType Directory -Force -Path $CacheRoot | Out-Null
+
     if ($SkipEnroll) {
       Require-Value -Name "DeviceId" -Value $DeviceId
       Require-Value -Name "HmacKey" -Value $HmacKey
-      $enrollment = [pscustomobject]@{
-        device_id = $DeviceId
-        hmac_key = $HmacKey
+      $config = [ordered]@{
+        base_url = $HiveBaseUrl.TrimEnd("/")
         ingest_path = "/v1/ingest"
+        device_id = $DeviceId
+        environment = $Environment
+        scan_profile = $ScanProfile
+        scan_roots = @($ScanRoot)
       }
+      $secrets = [ordered]@{
+        access_client_id = $AccessClientId
+        access_client_secret = $AccessClientSecret
+        hmac_key = $HmacKey
+      }
+      $config | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $ConfigRoot "config.json") -Encoding UTF8
+      $secrets | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $ConfigRoot "secrets.json") -Encoding UTF8
     } else {
-      $enrollment = Invoke-HiveEnroll -BaseUrl $HiveBaseUrl -Token $EnrollmentToken -ClientId $AccessClientId -ClientSecret $AccessClientSecret
+      Invoke-BumblebeeHiveJoin `
+        -BumblebeeExe $installedExe `
+        -BaseUrl $HiveBaseUrl `
+        -TargetConfigRoot $ConfigRoot `
+        -TargetCacheRoot $CacheRoot `
+        -Profile $ScanProfile `
+        -Roots @($ScanRoot) `
+        -DeviceEnvironment $Environment `
+        -ClientId $AccessClientId `
+        -ClientSecret $AccessClientSecret `
+        -Token $EnrollmentToken
     }
 
-    New-Item -ItemType Directory -Force -Path $ConfigRoot | Out-Null
-    $config = [pscustomobject]@{
-      hive_base_url = $HiveBaseUrl.TrimEnd("/")
-      ingest_url = "$($HiveBaseUrl.TrimEnd('/'))$($enrollment.ingest_path)"
-      device_id = [string]$enrollment.device_id
-      bumblebee_exe = $installedExe
-      interval_hours = $IntervalHours
-      scan_profile = $ScanProfile
-      scan_roots = @($ScanRoot)
-    }
-    $config | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $ConfigRoot "config.json") -Encoding UTF8
-
-    [pscustomobject]@{
-      HmacKey = Protect-String ([string]$enrollment.hmac_key)
-      AccessClientId = Protect-String $AccessClientId
-      AccessClientSecret = Protect-String $AccessClientSecret
-    } | Export-Clixml -LiteralPath (Join-Path $ConfigRoot "secrets.clixml")
+    $savedConfig = Get-Content -LiteralPath (Join-Path $ConfigRoot "config.json") -Raw | ConvertFrom-Json
 
     $runScript = Join-Path $ConfigRoot "run-baseline.ps1"
-    Write-RunScript -Path $runScript
+    Write-RunScript -Path $runScript -BumblebeeExe $installedExe -TargetConfigRoot $ConfigRoot -TargetCacheRoot $CacheRoot
 
     if (-not $SkipSchedule) {
       $action = New-ScheduledTaskAction -Execute "PowerShell.exe" -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$runScript`""
@@ -313,7 +305,9 @@ if ($PSCmdlet.ShouldProcess($InstallRoot, "Install Bumblebee and configure Hive 
     [pscustomobject]@{
       installed_exe = $installedExe
       config_root = $ConfigRoot
-      device_id = [string]$enrollment.device_id
+      cache_root = $CacheRoot
+      device_id = [string]$savedConfig.device_id
+      environment = [string]$savedConfig.environment
       scheduled = -not $SkipSchedule
     } | ConvertTo-Json
   } finally {

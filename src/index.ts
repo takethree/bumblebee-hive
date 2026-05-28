@@ -23,6 +23,10 @@ export interface Env {
   NORMALIZATION_PROCESSING_STALE_MINUTES?: string;
   UI_ADMIN_ACTION_EMAILS?: string;
   UI_ADMIN_ACTION_DOMAINS?: string;
+  CATALOG_UPSTREAM_SYNC_ENABLED?: string;
+  CATALOG_UPSTREAM_CONTENTS_URL?: string;
+  CATALOG_UPSTREAM_SOURCE?: string;
+  CATALOG_UPSTREAM_FILE_LIMIT?: string;
 }
 
 interface InventoryRecord {
@@ -82,6 +86,7 @@ interface AdminBatchTotalRow {
 
 interface AdminDeviceRow {
   device_id: string;
+  environment: DeviceEnvironment;
   created_at: string;
   disabled_at: string | null;
   run_count: number;
@@ -107,6 +112,7 @@ interface AdminRunRow {
 
 interface AdminHealthRow {
   device_id: string;
+  environment: DeviceEnvironment;
   created_at: string;
   last_run_id: string | null;
   last_run_status: string | null;
@@ -144,6 +150,7 @@ interface AdminNormalizationJobRow {
 
 interface AdminFindingRow {
   device_id: string;
+  environment?: DeviceEnvironment;
   run_id: string;
   record_id: string;
   profile: string;
@@ -165,6 +172,29 @@ interface AdminFindingRow {
 interface RetentionBatchRow {
   batch_id: string;
   object_key: string;
+}
+
+interface DevicePurgeBatchRow {
+  batch_id: string;
+  object_key: string;
+}
+
+interface DevicePurgeTargetRow {
+  device_id: string;
+  environment: DeviceEnvironment;
+  disabled_at: string | null;
+}
+
+interface DevicePurgeCounts {
+  raw_objects: number;
+  batches: number;
+  runs: number;
+  normalization_jobs: number;
+  inventory_records: number;
+  inventory_current: number;
+  exposure_findings: number;
+  lifecycle_events: number;
+  devices: number;
 }
 
 interface RetentionRunRow {
@@ -310,6 +340,52 @@ interface NormalizationResult {
   promotedCurrent: boolean;
 }
 
+interface CatalogPublishBody {
+  source?: string;
+  files?: Array<{
+    path?: string;
+    content?: string;
+  }>;
+}
+
+interface CatalogFileCandidate {
+  path: string;
+  content: string;
+  sha256: string;
+  entryCount: number;
+}
+
+interface CatalogPublishInputFile {
+  path?: string;
+  content?: string;
+}
+
+interface CatalogReleaseRow {
+  release_id: string;
+  source: string | null;
+  schema_version: string;
+  file_count: number;
+  entry_count: number;
+  bundle_sha256: string;
+  published_at: string;
+}
+
+interface CatalogFileRow {
+  release_id: string;
+  path: string;
+  sha256: string;
+  entry_count: number;
+  content_json: string;
+}
+
+interface UpstreamContentItem {
+  type?: string;
+  name?: string;
+  path?: string;
+  download_url?: string | null;
+  size?: number;
+}
+
 interface CountRow {
   total: number;
 }
@@ -340,9 +416,46 @@ const defaultHealthExpectedCadenceHours = 6;
 const defaultHealthStaleHours = 24;
 const defaultHealthWeekendGraceHours = 72;
 const defaultNormalizationProcessingStaleMinutes = 30;
+const defaultCatalogUpstreamContentsURL = "https://api.github.com/repos/perplexityai/bumblebee/contents/threat_intel?ref=main";
+const defaultCatalogUpstreamSource = "perplexityai/bumblebee/threat_intel";
+const defaultCatalogUpstreamFileLimit = 100;
 const accessJWKSByURL = new Map<string, ReturnType<typeof createRemoteJWKSet>>();
 
 type LifecycleAction = "disable" | "enable";
+type DeviceEnvironment = "production" | "test";
+type EnvironmentFilterValue = DeviceEnvironment | "all";
+
+function parseDeviceEnvironment(value: unknown, fallback: DeviceEnvironment = "production"): DeviceEnvironment {
+  const raw = typeof value === "string" ? value.trim().toLowerCase() : "";
+  if (!raw) {
+    return fallback;
+  }
+  if (raw === "production" || raw === "test") {
+    return raw;
+  }
+  throw new HttpError(400, "invalid_device_environment");
+}
+
+function environmentFilter(url: URL): EnvironmentFilterValue {
+  const raw = (url.searchParams.get("environment") || "production").trim().toLowerCase();
+  if (raw === "production" || raw === "test" || raw === "all") {
+    return raw;
+  }
+  throw new HttpError(400, "invalid_environment_filter");
+}
+
+function addEnvironmentFilter(
+  where: string[],
+  values: (string | number)[],
+  environment: EnvironmentFilterValue,
+  deviceColumn: string
+): void {
+  if (environment === "all") {
+    return;
+  }
+  where.push(`EXISTS (SELECT 1 FROM devices env_d WHERE env_d.device_id = ${deviceColumn} AND env_d.environment = ?)`);
+  values.push(environment);
+}
 
 interface LifecycleActor {
   type: "script" | "ui";
@@ -373,6 +486,18 @@ export default {
       if (request.method === "POST" && url.pathname === "/v1/ingest") {
         return await ingest(request, env);
       }
+      if (request.method === "GET" && url.pathname === "/v1/catalog/current") {
+        return await deviceCurrentCatalog(request, env);
+      }
+      if (request.method === "GET" && url.pathname === "/v1/admin/catalog/current") {
+        return await adminCurrentCatalog(request, env);
+      }
+      if (request.method === "POST" && url.pathname === "/v1/admin/catalog/current") {
+        return await adminPublishCatalog(request, env);
+      }
+      if (request.method === "POST" && url.pathname === "/v1/admin/catalog/sync-upstream") {
+        return await adminSyncCatalogUpstream(request, env);
+      }
       const disableMatch = url.pathname.match(/^\/v1\/admin\/devices\/([^/]+)\/disable$/);
       if (request.method === "POST" && disableMatch) {
         return await disableDevice(request, env, disableMatch[1]);
@@ -380,6 +505,10 @@ export default {
       const enableMatch = url.pathname.match(/^\/v1\/admin\/devices\/([^/]+)\/enable$/);
       if (request.method === "POST" && enableMatch) {
         return await enableDevice(request, env, enableMatch[1]);
+      }
+      const purgeMatch = url.pathname.match(/^\/v1\/admin\/devices\/([^/]+)\/purge$/);
+      if (request.method === "POST" && purgeMatch) {
+        return await purgeDevice(request, env, purgeMatch[1], url);
       }
       const uiLifecycleMatch = url.pathname.match(/^\/v1\/ui\/admin\/devices\/([^/]+)\/(disable|enable)$/);
       if (request.method === "POST" && uiLifecycleMatch) {
@@ -389,10 +518,10 @@ export default {
         return await runRetentionAdmin(request, env, url);
       }
       if (request.method === "GET" && url.pathname === "/v1/admin/overview") {
-        return await adminOverview(request, env);
+        return await adminOverview(request, env, url);
       }
       if (request.method === "GET" && url.pathname === "/v1/ui/admin/overview") {
-        return await uiAdminOverview(request, env);
+        return await uiAdminOverview(request, env, url);
       }
       if (request.method === "GET" && url.pathname === "/v1/admin/attention") {
         return await adminAttention(request, env, url);
@@ -401,7 +530,7 @@ export default {
         return await uiAdminAttention(request, env, url);
       }
       if (request.method === "GET" && url.pathname === "/v1/ui/admin/health") {
-        return await uiAdminHealth(request, env);
+        return await uiAdminHealth(request, env, url);
       }
       if (request.method === "GET" && url.pathname === "/v1/admin/devices") {
         return await adminDevices(request, env, url);
@@ -465,6 +594,9 @@ export default {
 
   async scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
     ctx.waitUntil(runRetention(env, { dryRun: false }));
+    if (catalogUpstreamSyncEnabled(env)) {
+      ctx.waitUntil(syncCatalogFromUpstream(env));
+    }
   },
 
   async queue(batch: MessageBatch<NormalizeQueueMessage>, env: Env): Promise<void> {
@@ -497,18 +629,20 @@ async function enroll(request: Request, env: Env): Promise<Response> {
     throw new HttpError(401, "invalid_enrollment_token");
   }
 
-  const body = await readOptionalJson<{ device_id?: string }>(request);
+  const body = await readOptionalJson<{ device_id?: string; environment?: string }>(request);
   const deviceID = sanitizeDeviceID(body.device_id || "") || crypto.randomUUID();
+  const deviceEnvironment = parseDeviceEnvironment(body.environment);
   const hmacKey = bytesToBase64url(crypto.getRandomValues(new Uint8Array(32)));
   const encrypted = await encryptSecret(env, hmacKey);
   const now = new Date().toISOString();
 
   await env.DB.prepare(
-    "INSERT INTO devices (device_id, hmac_key_ciphertext, hmac_key_nonce, created_at, disabled_at) VALUES (?, ?, ?, ?, NULL)"
-  ).bind(deviceID, encrypted.ciphertext, encrypted.nonce, now).run();
+    "INSERT INTO devices (device_id, hmac_key_ciphertext, hmac_key_nonce, created_at, disabled_at, environment) VALUES (?, ?, ?, ?, NULL, ?)"
+  ).bind(deviceID, encrypted.ciphertext, encrypted.nonce, now, deviceEnvironment).run();
 
   return json({
     device_id: deviceID,
+    environment: deviceEnvironment,
     hmac_key: hmacKey,
     ingest_path: "/v1/ingest",
     required_headers: [accessClientIDHeader, accessClientSecretHeader, deviceHeader]
@@ -577,6 +711,233 @@ async function ingest(request: Request, env: Env): Promise<Response> {
   }
 
   return json({ ok: true, batch_id: batchID, run_id: runID, records: records.length, run_complete: summary !== null });
+}
+
+async function adminPublishCatalog(request: Request, env: Env): Promise<Response> {
+  requireAccess(request, env);
+  requireAdminToken(request, env);
+  const body = await readOptionalJson<CatalogPublishBody>(request);
+  const bundle = await publishCatalogFiles(env, body.files || [], textOrNull(body.source));
+  return adminJson({ ok: true, catalog: bundle?.manifest }, 201);
+}
+
+async function adminSyncCatalogUpstream(request: Request, env: Env): Promise<Response> {
+  requireAccess(request, env);
+  requireAdminToken(request, env);
+  const bundle = await syncCatalogFromUpstream(env);
+  return adminJson({ ok: true, catalog: bundle?.manifest }, 201);
+}
+
+async function publishCatalogFiles(env: Env, inputFiles: CatalogPublishInputFile[], source: string | null): Promise<{ manifest: object; files: object[] } | null> {
+  const files = await validateCatalogFiles(inputFiles);
+  const schemaVersion = "0.1.0";
+  const entryCount = files.reduce((total, file) => total + file.entryCount, 0);
+  const bundlePayload = files.map((file) => `${file.path}\u0000${file.sha256}`).join("\n");
+  const bundleSHA = await sha256Hex(new TextEncoder().encode(bundlePayload));
+  const releaseID = `catalog-${bundleSHA.slice(0, 32)}`;
+  const publishedAt = new Date().toISOString();
+
+  const statements: D1PreparedStatement[] = [
+    env.DB.prepare(
+      "INSERT OR REPLACE INTO catalog_releases (release_id, source, schema_version, file_count, entry_count, bundle_sha256, published_at, active) VALUES (?, ?, ?, ?, ?, ?, ?, 0)"
+    ).bind(releaseID, source, schemaVersion, files.length, entryCount, bundleSHA, publishedAt),
+    env.DB.prepare("DELETE FROM catalog_files WHERE release_id = ?").bind(releaseID)
+  ];
+  for (const file of files) {
+    statements.push(env.DB.prepare(
+      "INSERT INTO catalog_files (release_id, path, sha256, entry_count, content_json) VALUES (?, ?, ?, ?, ?)"
+    ).bind(releaseID, file.path, file.sha256, file.entryCount, file.content));
+  }
+  statements.push(
+    env.DB.prepare("UPDATE catalog_releases SET active = 0 WHERE active = 1"),
+    env.DB.prepare("UPDATE catalog_releases SET active = 1 WHERE release_id = ?").bind(releaseID)
+  );
+  await runStatements(env, statements);
+
+  return currentCatalogBundle(env);
+}
+
+async function adminCurrentCatalog(request: Request, env: Env): Promise<Response> {
+  requireAccess(request, env);
+  requireAdminToken(request, env);
+  const bundle = await currentCatalogBundle(env);
+  if (!bundle) {
+    throw new HttpError(404, "catalog_not_found");
+  }
+  return adminJson(bundle);
+}
+
+async function deviceCurrentCatalog(request: Request, env: Env): Promise<Response> {
+  requireAccess(request, env);
+  const deviceID = sanitizeDeviceID(request.headers.get(deviceHeader) || "");
+  if (!deviceID) {
+    throw new HttpError(400, "missing_device_id");
+  }
+  await loadDevice(env, deviceID);
+  const bundle = await currentCatalogBundle(env);
+  if (!bundle) {
+    throw new HttpError(404, "catalog_not_found");
+  }
+  return adminJson(bundle);
+}
+
+async function validateCatalogFiles(inputFiles: CatalogPublishInputFile[]): Promise<CatalogFileCandidate[]> {
+  if (inputFiles.length === 0) {
+    throw new HttpError(400, "catalog_files_required");
+  }
+  if (inputFiles.length > 100) {
+    throw new HttpError(400, "too_many_catalog_files");
+  }
+  const seen = new Set<string>();
+  const files: CatalogFileCandidate[] = [];
+  for (const input of inputFiles) {
+    const path = safeCatalogFilePath(input.path || "");
+    if (!path) {
+      throw new HttpError(400, "invalid_catalog_path");
+    }
+    if (seen.has(path)) {
+      throw new HttpError(400, "duplicate_catalog_path");
+    }
+    seen.add(path);
+    const content = input.content || "";
+    if (new TextEncoder().encode(content).byteLength > 1024 * 1024) {
+      throw new HttpError(413, "catalog_file_too_large");
+    }
+    const entryCount = validateCatalogContent(content);
+    files.push({
+      path,
+      content,
+      sha256: await sha256Hex(new TextEncoder().encode(content)),
+      entryCount
+    });
+  }
+  files.sort((left, right) => left.path.localeCompare(right.path));
+  return files;
+}
+
+async function syncCatalogFromUpstream(env: Env): Promise<{ manifest: object; files: object[] } | null> {
+  const contentsURL = env.CATALOG_UPSTREAM_CONTENTS_URL || defaultCatalogUpstreamContentsURL;
+  const source = textOrNull(env.CATALOG_UPSTREAM_SOURCE) || defaultCatalogUpstreamSource;
+  const limit = positiveInt(env.CATALOG_UPSTREAM_FILE_LIMIT, defaultCatalogUpstreamFileLimit);
+  const listingResponse = await fetch(contentsURL, {
+    headers: {
+      "Accept": "application/vnd.github+json",
+      "User-Agent": "bumblebee-hive"
+    }
+  });
+  if (!listingResponse.ok) {
+    throw new HttpError(502, "catalog_upstream_list_failed");
+  }
+  const listing = await listingResponse.json() as unknown;
+  if (!Array.isArray(listing)) {
+    throw new HttpError(502, "catalog_upstream_list_invalid");
+  }
+  const catalogFiles = (listing as UpstreamContentItem[])
+    .filter((item) => item.type === "file" && item.name?.endsWith(".json") && item.download_url)
+    .sort((left, right) => String(left.name).localeCompare(String(right.name)))
+    .slice(0, limit);
+  if (catalogFiles.length === 0) {
+    throw new HttpError(502, "catalog_upstream_empty");
+  }
+  const files: CatalogPublishInputFile[] = [];
+  for (const item of catalogFiles) {
+    const path = safeCatalogFilePath(item.name || "");
+    if (!path) {
+      throw new HttpError(502, "catalog_upstream_invalid_path");
+    }
+    const contentResponse = await fetch(String(item.download_url), {
+      headers: { "User-Agent": "bumblebee-hive" }
+    });
+    if (!contentResponse.ok) {
+      throw new HttpError(502, "catalog_upstream_file_failed");
+    }
+    files.push({ path, content: await contentResponse.text() });
+  }
+  return publishCatalogFiles(env, files, source);
+}
+
+function catalogUpstreamSyncEnabled(env: Env): boolean {
+  const value = (env.CATALOG_UPSTREAM_SYNC_ENABLED || "").trim().toLowerCase();
+  return value === "1" || value === "true" || value === "yes";
+}
+
+function validateCatalogContent(content: string): number {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(content);
+  } catch {
+    throw new HttpError(400, "invalid_catalog_json");
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new HttpError(400, "invalid_catalog_json");
+  }
+  const catalog = parsed as { schema_version?: unknown; entries?: unknown };
+  if (catalog.schema_version !== "0.1.0") {
+    throw new HttpError(400, "unsupported_catalog_schema");
+  }
+  if (!Array.isArray(catalog.entries)) {
+    throw new HttpError(400, "invalid_catalog_entries");
+  }
+  for (const entry of catalog.entries) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      throw new HttpError(400, "invalid_catalog_entry");
+    }
+    const item = entry as { id?: unknown; ecosystem?: unknown; package?: unknown; versions?: unknown };
+    if (typeof item.id !== "string" || item.id.trim() === "") {
+      throw new HttpError(400, "invalid_catalog_entry");
+    }
+    if (typeof item.ecosystem !== "string" || item.ecosystem.trim() === "") {
+      throw new HttpError(400, "invalid_catalog_entry");
+    }
+    if (typeof item.package !== "string" || item.package.trim() === "") {
+      throw new HttpError(400, "invalid_catalog_entry");
+    }
+    if (!Array.isArray(item.versions) || item.versions.length === 0 || item.versions.some((version) => typeof version !== "string" || version.trim() === "")) {
+      throw new HttpError(400, "invalid_catalog_entry");
+    }
+  }
+  return catalog.entries.length;
+}
+
+function safeCatalogFilePath(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed || trimmed.length > 128 || !/^[A-Za-z0-9._-]+\.json$/.test(trimmed)) {
+    return "";
+  }
+  return trimmed;
+}
+
+async function currentCatalogBundle(env: Env): Promise<{ manifest: object; files: object[] } | null> {
+  const release = await env.DB.prepare(
+    "SELECT release_id, source, schema_version, file_count, entry_count, bundle_sha256, published_at FROM catalog_releases WHERE active = 1 ORDER BY published_at DESC LIMIT 1"
+  ).first<CatalogReleaseRow>();
+  if (!release) {
+    return null;
+  }
+  const files = await allRows<CatalogFileRow>(
+    env.DB.prepare("SELECT release_id, path, sha256, entry_count, content_json FROM catalog_files WHERE release_id = ? ORDER BY path ASC").bind(release.release_id)
+  );
+  return {
+    manifest: {
+      release_id: release.release_id,
+      source: release.source,
+      schema_version: release.schema_version,
+      file_count: release.file_count,
+      entry_count: release.entry_count,
+      bundle_sha256: release.bundle_sha256,
+      published_at: release.published_at,
+      files: files.map((file) => ({
+        path: file.path,
+        sha256: file.sha256,
+        entry_count: file.entry_count
+      }))
+    },
+    files: files.map((file) => ({
+      path: file.path,
+      sha256: file.sha256,
+      content: file.content_json
+    }))
+  };
 }
 
 async function normalizeQueuedBatch(env: Env, message: NormalizeQueueMessage): Promise<NormalizationResult> {
@@ -856,6 +1217,165 @@ async function changeDeviceLifecycle(env: Env, rawDeviceID: string, action: Life
   };
 }
 
+async function purgeDevice(request: Request, env: Env, rawDeviceID: string, url: URL): Promise<Response> {
+  requireAdminRequest(request, env);
+  const dryRun = ["1", "true", "yes"].includes((url.searchParams.get("dry_run") || "true").toLowerCase());
+  const body = await readOptionalJson<{ reason?: string; confirm_device_id?: string }>(request);
+  return adminJson(await purgeDeviceData(env, rawDeviceID, {
+    dryRun,
+    reason: body.reason,
+    confirmDeviceID: body.confirm_device_id
+  }));
+}
+
+async function purgeDeviceData(
+  env: Env,
+  rawDeviceID: string,
+  options: { dryRun: boolean; reason?: string; confirmDeviceID?: string }
+): Promise<object> {
+  const deviceID = sanitizeDeviceID(decodeURIComponent(rawDeviceID));
+  if (!deviceID) {
+    throw new HttpError(400, "invalid_device_id");
+  }
+  const device = await env.DB.prepare("SELECT device_id, environment, disabled_at FROM devices WHERE device_id = ?")
+    .bind(deviceID)
+    .first<DevicePurgeTargetRow>();
+  if (!device) {
+    throw new HttpError(404, "device_not_found");
+  }
+  const counts = await devicePurgeCounts(env, deviceID);
+  if (options.dryRun) {
+    return {
+      ok: true,
+      dry_run: true,
+      device: purgeDeviceSummary(device),
+      candidates: counts
+    };
+  }
+
+  const reason = lifecycleReason(options.reason, true);
+  if (sanitizeDeviceID(options.confirmDeviceID || "") !== deviceID) {
+    throw new HttpError(400, "confirm_device_id_mismatch");
+  }
+  if (device.environment === "production" && !device.disabled_at) {
+    throw new HttpError(409, "production_device_must_be_disabled");
+  }
+
+  const batchRows = await allRows<DevicePurgeBatchRow>(
+    env.DB.prepare("SELECT batch_id, object_key FROM batches WHERE device_id = ? ORDER BY received_at ASC").bind(deviceID)
+  );
+  let rawObjectsDeleted = 0;
+  let rawObjectDeleteErrors = 0;
+  for (const batch of batchRows) {
+    try {
+      await env.RAW_BATCHES.delete(batch.object_key);
+      rawObjectsDeleted++;
+    } catch {
+      rawObjectDeleteErrors++;
+    }
+  }
+  if (rawObjectDeleteErrors > 0) {
+    return {
+      ok: false,
+      dry_run: false,
+      error: "raw_object_delete_failed",
+      device: purgeDeviceSummary(device),
+      raw_objects: {
+        candidates: batchRows.length,
+        deleted: rawObjectsDeleted,
+        delete_errors: rawObjectDeleteErrors
+      }
+    };
+  }
+
+  const deleted = await deleteDeviceData(env, deviceID);
+  return {
+    ok: true,
+    dry_run: false,
+    device: purgeDeviceSummary(device),
+    reason,
+    raw_objects: {
+      candidates: batchRows.length,
+      deleted: rawObjectsDeleted,
+      delete_errors: rawObjectDeleteErrors
+    },
+    deleted
+  };
+}
+
+function purgeDeviceSummary(device: DevicePurgeTargetRow): object {
+  return {
+    device_id: device.device_id,
+    environment: device.environment || "production",
+    status: device.disabled_at ? "disabled" : "active",
+    disabled_at: device.disabled_at || null
+  };
+}
+
+async function devicePurgeCounts(env: Env, deviceID: string): Promise<DevicePurgeCounts> {
+  const [
+    batches,
+    runs,
+    normalizationJobs,
+    inventoryRecords,
+    inventoryCurrent,
+    exposureFindings,
+    lifecycleEvents
+  ] = await Promise.all([
+    countByDevice(env, "batches", deviceID),
+    countByDevice(env, "runs", deviceID),
+    countByDevice(env, "normalization_jobs", deviceID),
+    countByDevice(env, "inventory_records", deviceID),
+    countByDevice(env, "inventory_current", deviceID),
+    countByDevice(env, "exposure_findings", deviceID),
+    countByDevice(env, "device_lifecycle_events", deviceID)
+  ]);
+  return {
+    raw_objects: batches,
+    batches,
+    runs,
+    normalization_jobs: normalizationJobs,
+    inventory_records: inventoryRecords,
+    inventory_current: inventoryCurrent,
+    exposure_findings: exposureFindings,
+    lifecycle_events: lifecycleEvents,
+    devices: 1
+  };
+}
+
+async function countByDevice(env: Env, table: string, deviceID: string): Promise<number> {
+  const row = await env.DB.prepare(`SELECT COUNT(*) AS total FROM ${table} WHERE device_id = ?`).bind(deviceID).first<CountRow>();
+  return row?.total || 0;
+}
+
+async function deleteDeviceData(env: Env, deviceID: string): Promise<DevicePurgeCounts> {
+  const deleted: DevicePurgeCounts = {
+    raw_objects: 0,
+    batches: 0,
+    runs: 0,
+    normalization_jobs: 0,
+    inventory_records: 0,
+    inventory_current: 0,
+    exposure_findings: 0,
+    lifecycle_events: 0,
+    devices: 0
+  };
+  for (const [key, table] of [
+    ["inventory_current", "inventory_current"],
+    ["exposure_findings", "exposure_findings"],
+    ["inventory_records", "inventory_records"],
+    ["normalization_jobs", "normalization_jobs"],
+    ["batches", "batches"],
+    ["runs", "runs"],
+    ["lifecycle_events", "device_lifecycle_events"],
+    ["devices", "devices"]
+  ] as const) {
+    const result = await env.DB.prepare(`DELETE FROM ${table} WHERE device_id = ?`).bind(deviceID).run();
+    deleted[key] = typeof result.meta?.changes === "number" ? result.meta.changes : 0;
+  }
+  return deleted;
+}
+
 async function runRetentionAdmin(request: Request, env: Env, url: URL): Promise<Response> {
   requireAdminRequest(request, env);
   const dryRun = ["1", "true", "yes"].includes((url.searchParams.get("dry_run") || "").toLowerCase());
@@ -958,14 +1478,14 @@ async function deleteRunsByID(env: Env, runs: RetentionRunRow[]): Promise<number
   return typeof result.meta?.changes === "number" ? result.meta.changes : runs.length;
 }
 
-async function adminOverview(request: Request, env: Env): Promise<Response> {
+async function adminOverview(request: Request, env: Env, url: URL): Promise<Response> {
   requireAdminRequest(request, env);
-  return adminJson(await adminOverviewData(env));
+  return adminJson(await adminOverviewData(env, url));
 }
 
-async function uiAdminOverview(request: Request, env: Env): Promise<Response> {
+async function uiAdminOverview(request: Request, env: Env, url: URL): Promise<Response> {
   await requireUIAdminRequest(request, env);
-  return adminJson(await adminOverviewData(env));
+  return adminJson(await adminOverviewData(env, url));
 }
 
 async function adminAttention(request: Request, env: Env, url: URL): Promise<Response> {
@@ -978,21 +1498,28 @@ async function uiAdminAttention(request: Request, env: Env, url: URL): Promise<R
   return adminJson(await adminAttentionData(env, url));
 }
 
-async function uiAdminHealth(request: Request, env: Env): Promise<Response> {
+async function uiAdminHealth(request: Request, env: Env, url: URL): Promise<Response> {
   await requireUIAdminRequest(request, env);
-  return adminJson(await adminHealthData(env));
+  return adminJson(await adminHealthData(env, url));
 }
 
-async function adminOverviewData(env: Env): Promise<object> {
+async function adminOverviewData(env: Env, url: URL): Promise<object> {
+  const environment = environmentFilter(url);
+  const deviceWhere = environment === "all" ? "" : "WHERE environment = ?";
+  const deviceValues: string[] = environment === "all" ? [] : [environment];
+  const relationWhere = environment === "all"
+    ? ""
+    : "WHERE EXISTS (SELECT 1 FROM devices d WHERE d.device_id = DEVICE_COLUMN AND d.environment = ?)";
+  const relationValues: string[] = environment === "all" ? [] : [environment];
   const devices = await env.DB.prepare(
-    "SELECT COUNT(*) AS total_devices, SUM(CASE WHEN disabled_at IS NULL THEN 1 ELSE 0 END) AS active_devices, SUM(CASE WHEN disabled_at IS NOT NULL THEN 1 ELSE 0 END) AS disabled_devices FROM devices"
-  ).first<AdminOverviewRow>();
+    `SELECT COUNT(*) AS total_devices, SUM(CASE WHEN disabled_at IS NULL THEN 1 ELSE 0 END) AS active_devices, SUM(CASE WHEN disabled_at IS NOT NULL THEN 1 ELSE 0 END) AS disabled_devices FROM devices ${deviceWhere}`
+  ).bind(...deviceValues).first<AdminOverviewRow>();
   const runs = await env.DB.prepare(
-    "SELECT COUNT(*) AS total_runs, SUM(CASE WHEN status = 'complete' THEN 1 ELSE 0 END) AS complete_runs, MAX(received_at) AS latest_run_received_at FROM runs"
-  ).first<AdminRunOverviewRow>();
+    `SELECT COUNT(*) AS total_runs, SUM(CASE WHEN status = 'complete' THEN 1 ELSE 0 END) AS complete_runs, MAX(received_at) AS latest_run_received_at FROM runs r ${relationWhere.replace("DEVICE_COLUMN", "r.device_id")}`
+  ).bind(...relationValues).first<AdminRunOverviewRow>();
   const batches = await env.DB.prepare(
-    "SELECT COUNT(*) AS total_batches, SUM(record_count) AS total_records FROM batches"
-  ).first<AdminBatchTotalRow>();
+    `SELECT COUNT(*) AS total_batches, SUM(record_count) AS total_records FROM batches b ${relationWhere.replace("DEVICE_COLUMN", "b.device_id")}`
+  ).bind(...relationValues).first<AdminBatchTotalRow>();
 
   return {
     devices: {
@@ -1008,15 +1535,31 @@ async function adminOverviewData(env: Env): Promise<object> {
     batches: {
       total: batches?.total_batches || 0,
       records: batches?.total_records || 0
-    }
+    },
+    environment
   };
 }
 
-async function adminHealthData(env: Env): Promise<object> {
+async function adminHealthData(env: Env, url?: URL): Promise<object> {
   const config = healthConfig(env);
+  const environment = url ? environmentFilter(url) : "production";
+  const where = ["d.disabled_at IS NULL"];
+  const values = [
+    config.profile,
+    config.profile,
+    config.profile,
+    config.profile,
+    config.profile,
+    config.profile
+  ];
+  if (environment !== "all") {
+    where.push("d.environment = ?");
+    values.push(environment);
+  }
   const rows = await allRows<AdminHealthRow>(
     env.DB.prepare(`SELECT
       d.device_id,
+      d.environment,
       d.created_at,
       (SELECT run_id FROM runs r WHERE r.device_id = d.device_id AND r.profile = ? ORDER BY received_at DESC LIMIT 1) AS last_run_id,
       (SELECT status FROM runs r WHERE r.device_id = d.device_id AND r.profile = ? ORDER BY received_at DESC LIMIT 1) AS last_run_status,
@@ -1025,15 +1568,8 @@ async function adminHealthData(env: Env): Promise<object> {
       (SELECT run_id FROM runs r WHERE r.device_id = d.device_id AND r.profile = ? AND r.status = 'complete' ORDER BY received_at DESC LIMIT 1) AS last_complete_run_id,
       (SELECT received_at FROM runs r WHERE r.device_id = d.device_id AND r.profile = ? AND r.status = 'complete' ORDER BY received_at DESC LIMIT 1) AS last_complete_received_at
     FROM devices d
-    WHERE d.disabled_at IS NULL
-    ORDER BY COALESCE(last_run_received_at, d.created_at) DESC`).bind(
-      config.profile,
-      config.profile,
-      config.profile,
-      config.profile,
-      config.profile,
-      config.profile
-    )
+    WHERE ${where.join(" AND ")}
+    ORDER BY COALESCE(last_run_received_at, d.created_at) DESC`).bind(...values)
   );
   const now = new Date();
   const devices = rows.map((row) => formatHealthRow(row, config, now));
@@ -1049,7 +1585,8 @@ async function adminHealthData(env: Env): Promise<object> {
       weekend_grace_hours: config.weekendGraceHours
     },
     counts,
-    devices
+    devices,
+    environment
   };
 }
 
@@ -1066,7 +1603,8 @@ async function adminAttentionData(env: Env, url: URL): Promise<object> {
   const limit = boundedIntParam(url.searchParams, "limit", 10, 100);
   const offset = boundedIntParam(url.searchParams, "offset", 0, 100000);
   const config = attentionConfig(env);
-  const health = await adminHealthData(env) as {
+  const environment = environmentFilter(url);
+  const health = await adminHealthData(env, url) as {
     devices: HealthDevice[];
   };
   const attention: AttentionItem[] = [];
@@ -1114,7 +1652,8 @@ async function adminAttentionData(env: Env, url: URL): Promise<object> {
     ...paginationMeta(filtered.length, limit, offset),
     filters: {
       severity,
-      reason: reason || null
+      reason: reason || null,
+      environment
     }
   };
 }
@@ -1134,22 +1673,31 @@ async function adminDevicesData(env: Env, url: URL): Promise<object> {
   if (!["active", "disabled", "all"].includes(status)) {
     throw new HttpError(400, "invalid_status_filter");
   }
+  const environment = environmentFilter(url);
   const limit = boundedIntParam(url.searchParams, "limit", 50, 100);
   const offset = boundedIntParam(url.searchParams, "offset", 0, 100000);
-  const where = status === "active"
-    ? "WHERE d.disabled_at IS NULL"
-    : status === "disabled"
-      ? "WHERE d.disabled_at IS NOT NULL"
-      : "";
-  const count = await env.DB.prepare(`SELECT COUNT(*) AS total FROM devices d ${where}`).first<CountRow>();
+  const whereParts: string[] = [];
+  const values: (string | number)[] = [];
+  if (status === "active") {
+    whereParts.push("d.disabled_at IS NULL");
+  } else if (status === "disabled") {
+    whereParts.push("d.disabled_at IS NOT NULL");
+  }
+  if (environment !== "all") {
+    whereParts.push("d.environment = ?");
+    values.push(environment);
+  }
+  const where = whereParts.length ? `WHERE ${whereParts.join(" AND ")}` : "";
+  const count = await env.DB.prepare(`SELECT COUNT(*) AS total FROM devices d ${where}`).bind(...values).first<CountRow>();
   const rows = await allRows<AdminDeviceRow>(
-    env.DB.prepare(`${adminDeviceSelect()} ${where} ORDER BY COALESCE(last_run_received_at, d.created_at) DESC LIMIT ? OFFSET ?`).bind(limit, offset)
+    env.DB.prepare(`${adminDeviceSelect()} ${where} ORDER BY COALESCE(last_run_received_at, d.created_at) DESC LIMIT ? OFFSET ?`).bind(...values, limit, offset)
   );
 
   return {
     devices: rows.map(formatAdminDeviceRow),
     ...paginationMeta(count?.total || 0, limit, offset),
-    status
+    status,
+    environment
   };
 }
 
@@ -1205,6 +1753,8 @@ async function uiAdminRuns(request: Request, env: Env, url: URL): Promise<Respon
 async function adminRunsData(env: Env, url: URL): Promise<object> {
   const where: string[] = [];
   const values: (string | number)[] = [];
+  const environment = environmentFilter(url);
+  addEnvironmentFilter(where, values, environment, "r.device_id");
   const deviceID = url.searchParams.get("device_id");
   if (deviceID) {
     const sanitized = sanitizeDeviceID(deviceID);
@@ -1232,7 +1782,8 @@ async function adminRunsData(env: Env, url: URL): Promise<object> {
 
   return {
     runs: rowsWithCounts(rows),
-    ...paginationMeta(count?.total || 0, limit, offset)
+    ...paginationMeta(count?.total || 0, limit, offset),
+    environment
   };
 }
 
@@ -1259,6 +1810,8 @@ async function uiAdminFindings(request: Request, env: Env, url: URL): Promise<Re
 async function adminNormalizationJobsData(env: Env, url: URL): Promise<object> {
   const where: string[] = [];
   const values: (string | number)[] = [];
+  const environment = environmentFilter(url);
+  addEnvironmentFilter(where, values, environment, "normalization_jobs.device_id");
   const deviceID = url.searchParams.get("device_id");
   if (deviceID) {
     const sanitized = sanitizeDeviceID(deviceID);
@@ -1304,7 +1857,8 @@ async function adminNormalizationJobsData(env: Env, url: URL): Promise<object> {
       status: status || null,
       device_id: deviceID ? sanitizeDeviceID(deviceID) : null,
       run_id: runID || null,
-      promoted_current: promotedCurrent || null
+      promoted_current: promotedCurrent || null,
+      environment
     }
   };
 }
@@ -1312,6 +1866,8 @@ async function adminNormalizationJobsData(env: Env, url: URL): Promise<object> {
 async function adminFindingsData(env: Env, url: URL): Promise<object> {
   const where: string[] = [];
   const values: (string | number)[] = [];
+  const environment = environmentFilter(url);
+  addEnvironmentFilter(where, values, environment, "exposure_findings.device_id");
   const deviceID = url.searchParams.get("device_id");
   if (deviceID) {
     const sanitized = sanitizeDeviceID(deviceID);
@@ -1363,7 +1919,8 @@ async function adminFindingsData(env: Env, url: URL): Promise<object> {
       query: query || null,
       device_id: deviceID ? sanitizeDeviceID(deviceID) : null,
       profile: textField(url.searchParams.get("profile") || "") || null,
-      run_id: textField(url.searchParams.get("run_id") || "") || null
+      run_id: textField(url.searchParams.get("run_id") || "") || null,
+      environment
     }
   };
 }
@@ -1406,6 +1963,8 @@ async function adminPackagesData(env: Env, url: URL, rawDeviceID: string | null)
   const view = requestedView;
   const where: string[] = [];
   const values: (string | number)[] = [];
+  const environment = environmentFilter(url);
+  addEnvironmentFilter(where, values, environment, "inventory_current.device_id");
   const deviceParam = rawDeviceID ? decodeURIComponent(rawDeviceID) : url.searchParams.get("device_id");
   if (deviceParam) {
     const deviceID = sanitizeDeviceID(deviceParam);
@@ -1439,7 +1998,8 @@ async function adminPackagesData(env: Env, url: URL, rawDeviceID: string | null)
     packages,
     ...paginationMeta(count, limit, offset),
     query,
-    device_id: deviceParam ? sanitizeDeviceID(deviceParam) : null
+    device_id: deviceParam ? sanitizeDeviceID(deviceParam) : null,
+    environment
   };
 }
 
@@ -1455,6 +2015,8 @@ async function adminPackageDetailData(env: Env, url: URL): Promise<object> {
 
   const where: string[] = [];
   const values: (string | number)[] = [];
+  const environment = environmentFilter(url);
+  addEnvironmentFilter(where, values, environment, "inventory_current.device_id");
   const deviceParam = url.searchParams.get("device_id");
   if (deviceParam) {
     const deviceID = sanitizeDeviceID(deviceParam);
@@ -1486,6 +2048,7 @@ async function adminPackageDetailData(env: Env, url: URL): Promise<object> {
     ecosystem,
     profile: profile || null,
     device_id: deviceParam ? sanitizeDeviceID(deviceParam) : null,
+    environment,
     observation_limit: observationLimit
   });
 }
@@ -1572,6 +2135,7 @@ function paginationMeta(total: number, limit: number, offset: number): object {
 function adminDeviceSelect(): string {
   return `SELECT
     d.device_id,
+    d.environment,
     d.created_at,
     d.disabled_at,
     (SELECT COUNT(*) FROM runs r WHERE r.device_id = d.device_id) AS run_count,
@@ -1741,6 +2305,7 @@ function adminPackageFamilyVersionSelect(whereSQL: string): string {
 function formatAdminDeviceRow(row: AdminDeviceRow): object {
   return {
     device_id: row.device_id,
+    environment: row.environment || "production",
     created_at: row.created_at,
     disabled_at: row.disabled_at,
     status: row.disabled_at ? "disabled" : "active",
@@ -1847,7 +2412,7 @@ function formatPackageVersionRow(row: NormalizedPackageSummaryRow): object {
 
 function formatPackageDetailRows(
   rows: NormalizedPackageRow[],
-  filters: { name: string; ecosystem: string; profile: string | null; device_id: string | null; observation_limit: number }
+  filters: { name: string; ecosystem: string; profile: string | null; device_id: string | null; environment: EnvironmentFilterValue; observation_limit: number }
 ): object {
   const first = rows[0];
   const summary: PackageDetailAccumulator = {
@@ -2149,6 +2714,7 @@ interface AttentionConfig extends HealthConfig {
 
 interface HealthDevice {
   device_id: string;
+  environment?: DeviceEnvironment;
   health: HealthStatus;
   reason: string;
   profile: string;
@@ -2319,6 +2885,7 @@ function formatHealthRow(row: AdminHealthRow, config: HealthConfig, now: Date): 
 
   return {
     device_id: row.device_id,
+    environment: row.environment || "production",
     health,
     reason,
     profile: config.profile,

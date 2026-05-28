@@ -4,6 +4,7 @@ param(
   [string]$Mode = "CheckOnly",
   [string]$InstallRoot = "$env:LOCALAPPDATA\Programs\Bumblebee",
   [string]$ConfigRoot = "$env:APPDATA\Bumblebee",
+  [string]$CacheRoot = "$env:LOCALAPPDATA\Bumblebee\catalog-cache",
   [string]$TaskName = "Bumblebee Baseline Pilot",
   [string]$AdminSecretsPath = ".local\deployment-secrets.clixml",
   [string]$WorkersDevUrl = "",
@@ -84,6 +85,39 @@ function Get-JsonProperty {
   $Object.PSObject.Properties[$Name].Value
 }
 
+function Get-HiveBaseUrl {
+  param([object]$Config)
+  $baseUrl = Get-JsonProperty -Object $Config -Name "base_url"
+  if ([string]::IsNullOrWhiteSpace([string]$baseUrl)) {
+    $baseUrl = Get-JsonProperty -Object $Config -Name "hive_base_url"
+  }
+  [string]$baseUrl
+}
+
+function Get-HiveEnvironment {
+  param([object]$Config)
+  $environment = [string](Get-JsonProperty -Object $Config -Name "environment")
+  if ([string]::IsNullOrWhiteSpace($environment)) {
+    return "production"
+  }
+  $environment
+}
+
+function Add-EnvironmentQuery {
+  param([string]$Path, [object]$Config)
+  $environment = [uri]::EscapeDataString((Get-HiveEnvironment -Config $Config))
+  if ($Path.Contains("?")) {
+    return "$Path&environment=$environment"
+  }
+  "$Path?environment=$environment"
+}
+
+function Test-JsonSecretPresent {
+  param([object]$Secrets, [string]$Name)
+  $value = Get-JsonProperty -Object $Secrets -Name $Name
+  -not [string]::IsNullOrWhiteSpace([string]$value)
+}
+
 function Add-Failure {
   param([System.Collections.Generic.List[string]]$Failures, [string]$Code)
   if (-not $Failures.Contains($Code)) {
@@ -145,7 +179,8 @@ function Get-LatestRun {
   )
   $deviceID = [uri]::EscapeDataString([string]$Config.device_id)
   $profile = [uri]::EscapeDataString([string]$Config.scan_profile)
-  $response = Invoke-HiveAdmin -Client $Client -HiveBaseUrl ([string]$Config.hive_base_url) -Path "/v1/admin/runs?device_id=$deviceID&profile=$profile&limit=1&offset=0"
+  $path = Add-EnvironmentQuery -Path "/v1/admin/runs?device_id=$deviceID&profile=$profile&limit=1&offset=0" -Config $Config
+  $response = Invoke-HiveAdmin -Client $Client -HiveBaseUrl (Get-HiveBaseUrl -Config $Config) -Path $path
   $runs = @(Get-JsonProperty -Object $response.body -Name "runs")
   if ($response.status_code -ne 200 -or $runs.Count -eq 0) {
     return [pscustomobject]@{
@@ -202,7 +237,8 @@ function Get-NormalizationVisibility {
     [object]$Config
   )
   $deviceID = [uri]::EscapeDataString([string]$Config.device_id)
-  $response = Invoke-HiveAdmin -Client $Client -HiveBaseUrl ([string]$Config.hive_base_url) -Path "/v1/admin/normalization-jobs?device_id=$deviceID&limit=5&offset=0"
+  $path = Add-EnvironmentQuery -Path "/v1/admin/normalization-jobs?device_id=$deviceID&limit=5&offset=0" -Config $Config
+  $response = Invoke-HiveAdmin -Client $Client -HiveBaseUrl (Get-HiveBaseUrl -Config $Config) -Path $path
   $jobs = @(Get-JsonProperty -Object $response.body -Name "normalization_jobs")
   [pscustomobject]@{
     status_code = $response.status_code
@@ -222,7 +258,7 @@ function Get-AttentionVisibility {
     [System.Net.Http.HttpClient]$Client,
     [object]$Config
   )
-  $response = Invoke-HiveAdmin -Client $Client -HiveBaseUrl ([string]$Config.hive_base_url) -Path "/v1/admin/attention?limit=5&offset=0"
+  $response = Invoke-HiveAdmin -Client $Client -HiveBaseUrl (Get-HiveBaseUrl -Config $Config) -Path (Add-EnvironmentQuery -Path "/v1/admin/attention?limit=5&offset=0" -Config $Config)
   $attention = @(Get-JsonProperty -Object $response.body -Name "attention")
   $counts = Get-JsonProperty -Object $response.body -Name "counts"
   [pscustomobject]@{
@@ -242,7 +278,7 @@ function Get-FindingsVisibility {
     [System.Net.Http.HttpClient]$Client,
     [object]$Config
   )
-  $response = Invoke-HiveAdmin -Client $Client -HiveBaseUrl ([string]$Config.hive_base_url) -Path "/v1/admin/findings?limit=5&offset=0"
+  $response = Invoke-HiveAdmin -Client $Client -HiveBaseUrl (Get-HiveBaseUrl -Config $Config) -Path (Add-EnvironmentQuery -Path "/v1/admin/findings?limit=5&offset=0" -Config $Config)
   $findings = @(Get-JsonProperty -Object $response.body -Name "findings")
   $counts = Get-JsonProperty -Object $response.body -Name "counts"
   [pscustomobject]@{
@@ -261,7 +297,7 @@ function Get-DeviceDetailVisibility {
     [object]$Config
   )
   $deviceID = [uri]::EscapeDataString([string]$Config.device_id)
-  $response = Invoke-HiveAdmin -Client $Client -HiveBaseUrl ([string]$Config.hive_base_url) -Path "/v1/admin/devices/$deviceID"
+  $response = Invoke-HiveAdmin -Client $Client -HiveBaseUrl (Get-HiveBaseUrl -Config $Config) -Path "/v1/admin/devices/$deviceID"
   $jobs = @(Get-JsonProperty -Object $response.body -Name "recent_normalization_jobs")
   [pscustomobject]@{
     status_code = $response.status_code
@@ -365,7 +401,8 @@ $freshNormalization = $null
 try {
   $configPath = Join-Path $ConfigRoot "config.json"
   $runScript = Join-Path $ConfigRoot "run-baseline.ps1"
-  $localSecretsPath = Join-Path $ConfigRoot "secrets.clixml"
+  $localSecretsPath = Join-Path $ConfigRoot "secrets.json"
+  $legacySecretsPath = Join-Path $ConfigRoot "secrets.clixml"
   $adminSecretsResolved = Resolve-OperatorPath -Path $AdminSecretsPath
   $expectedExe = Join-Path $InstallRoot "bumblebee.exe"
 
@@ -377,16 +414,29 @@ try {
   }
 
   $config = Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json
-  $configuredExe = [string]$config.bumblebee_exe
-  $configuredIngest = [uri]([string]$config.ingest_url)
+  $hiveBaseUrl = Get-HiveBaseUrl -Config $config
+  $configuredIngestPath = [string](Get-JsonProperty -Object $config -Name "ingest_path")
+  $configuredEnvironment = Get-HiveEnvironment -Config $config
+  $localSecrets = $null
+  if (Test-Path -LiteralPath $localSecretsPath -PathType Leaf) {
+    $localSecrets = Get-Content -LiteralPath $localSecretsPath -Raw | ConvertFrom-Json
+  }
+  $runScriptText = if (Test-Path -LiteralPath $runScript -PathType Leaf) { Get-Content -LiteralPath $runScript -Raw } else { "" }
 
-  $checks.Add((New-Check -Name "local_secrets_present" -Passed (Test-Path -LiteralPath $localSecretsPath -PathType Leaf)))
+  $checks.Add((New-Check -Name "local_hive_secrets_present" -Passed (Test-Path -LiteralPath $localSecretsPath -PathType Leaf)))
+  $checks.Add((New-Check -Name "legacy_dpapi_secrets_absent" -Passed (-not (Test-Path -LiteralPath $legacySecretsPath -PathType Leaf))))
   $checks.Add((New-Check -Name "run_script_present" -Passed (Test-Path -LiteralPath $runScript -PathType Leaf)))
+  $checks.Add((New-Check -Name "run_script_uses_hive_run" -Passed ($runScriptText -match '"hive"\s*,\s*"run"' -and $runScriptText -match "--config-dir" -and $runScriptText -match "--cache-dir")))
   $checks.Add((New-Check -Name "expected_binary_present" -Passed (Test-Path -LiteralPath $expectedExe -PathType Leaf)))
-  $checks.Add((New-Check -Name "configured_binary_present" -Passed (Test-Path -LiteralPath $configuredExe -PathType Leaf)))
+  $checks.Add((New-Check -Name "cache_root_present" -Passed (Test-Path -LiteralPath $CacheRoot -PathType Container)))
+  $checks.Add((New-Check -Name "configured_base_url_present" -Passed (-not [string]::IsNullOrWhiteSpace($hiveBaseUrl))))
   $checks.Add((New-Check -Name "configured_device_id_present" -Passed (-not [string]::IsNullOrWhiteSpace([string]$config.device_id))))
-  $checks.Add((New-Check -Name "configured_ingest_path" -Passed ($configuredIngest.AbsolutePath -eq "/v1/ingest") -Detail @{ path = $configuredIngest.AbsolutePath }))
+  $checks.Add((New-Check -Name "configured_ingest_path" -Passed ($configuredIngestPath -eq "/v1/ingest") -Detail @{ path = $configuredIngestPath }))
+  $checks.Add((New-Check -Name "configured_environment" -Passed (@("production", "test") -contains $configuredEnvironment) -Detail @{ environment = $configuredEnvironment }))
   $checks.Add((New-Check -Name "configured_scan_profile" -Passed (-not [string]::IsNullOrWhiteSpace([string]$config.scan_profile)) -Detail @{ profile = [string]$config.scan_profile }))
+  $checks.Add((New-Check -Name "local_access_client_id_present" -Passed (Test-JsonSecretPresent -Secrets $localSecrets -Name "access_client_id")))
+  $checks.Add((New-Check -Name "local_access_client_secret_present" -Passed (Test-JsonSecretPresent -Secrets $localSecrets -Name "access_client_secret")))
+  $checks.Add((New-Check -Name "local_hmac_key_present" -Passed (Test-JsonSecretPresent -Secrets $localSecrets -Name "hmac_key")))
 
   foreach ($check in $checks) {
     if (-not $check.passed) {
@@ -394,8 +444,8 @@ try {
     }
   }
 
-  if (Test-Path -LiteralPath $configuredExe -PathType Leaf) {
-    & $configuredExe selftest *> $null
+  if (Test-Path -LiteralPath $expectedExe -PathType Leaf) {
+    & $expectedExe selftest *> $null
     $checks.Add((New-Check -Name "selftest_passed" -Passed ($LASTEXITCODE -eq 0) -Detail @{ exit_code = $LASTEXITCODE }))
     if ($LASTEXITCODE -ne 0) {
       Add-Failure -Failures $failures -Code "selftest_failed"
@@ -420,7 +470,7 @@ try {
   $client = New-HiveClient -AdminSecrets $adminSecrets
   $adminResponses = @()
   foreach ($adminPath in @("/v1/admin/overview", "/v1/admin/attention?limit=5&offset=0", "/v1/admin/findings?limit=5&offset=0", "/v1/admin/devices?status=all&limit=5&offset=0", "/v1/admin/runs?limit=5&offset=0")) {
-    $response = Invoke-HiveAdmin -Client $client -HiveBaseUrl ([string]$config.hive_base_url) -Path $adminPath
+    $response = Invoke-HiveAdmin -Client $client -HiveBaseUrl $hiveBaseUrl -Path (Add-EnvironmentQuery -Path $adminPath -Config $config)
     $matches = @(Test-ForbiddenFields -Body $response.body_text)
     $adminResponses += [pscustomobject]@{
       path = $adminPath
@@ -439,8 +489,8 @@ try {
     }
   }
 
-  $adminPage = Invoke-HiveAsset -HiveBaseUrl ([string]$config.hive_base_url) -Path "/admin/"
-  $adminScript = Invoke-HiveAsset -HiveBaseUrl ([string]$config.hive_base_url) -Path "/admin/app.js"
+  $adminPage = Invoke-HiveAsset -HiveBaseUrl $hiveBaseUrl -Path "/admin/"
+  $adminScript = Invoke-HiveAsset -HiveBaseUrl $hiveBaseUrl -Path "/admin/app.js"
   $adminAssets = [ordered]@{
     page_status_code = $adminPage.status_code
     page_has_title = $adminPage.body_text -like "*Bumblebee Hive Admin*"

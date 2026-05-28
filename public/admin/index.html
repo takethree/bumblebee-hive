@@ -13,6 +13,14 @@
         <p id="last-refresh">Not loaded</p>
       </div>
       <div class="actions">
+        <label>
+          Environment
+          <select id="environment">
+            <option value="production">Production</option>
+            <option value="test">Test</option>
+            <option value="all">All</option>
+          </select>
+        </label>
         <label class="toggle">
           <input id="auto-refresh" type="checkbox">
           <span>Auto-refresh</span>
@@ -233,6 +241,7 @@
             <thead>
               <tr>
                 <th>Device</th>
+                <th>Environment</th>
                 <th>Status</th>
                 <th>Runs</th>
                 <th>Batches</th>
@@ -241,7 +250,7 @@
               </tr>
             </thead>
             <tbody id="devices-body">
-              <tr><td colspan="6">Loading devices...</td></tr>
+              <tr><td colspan="7">Loading devices...</td></tr>
             </tbody>
           </table>
         </div>

@@ -1,6 +1,7 @@
 const packageViewStorageKey = "hive.inventory.view";
 const packageViews = new Set(["package", "summary", "observations"]);
 const pageSizes = new Set([10, 25, 50, 100]);
+const environments = new Set(["production", "test", "all"]);
 const pageSizeStorageKeys = {
   devicePageSize: "hive.devices.page.size",
   attentionPageSize: "hive.attention.page.size",
@@ -17,6 +18,7 @@ const state = {
   selectedPackageEcosystem: "",
   selectedPackageProfile: "",
   selectedPackageDeviceId: "",
+  environment: "production",
   autoRefreshTimer: 0,
   packageView: storedPackageView(),
   devicePageSize: storedPageSize("devicePageSize"),
@@ -40,6 +42,7 @@ const el = {
   autoRefresh: document.querySelector("#auto-refresh"),
   lastRefresh: document.querySelector("#last-refresh"),
   error: document.querySelector("#error"),
+  environment: document.querySelector("#environment"),
   devicePageSize: document.querySelector("#device-page-size"),
   attentionPageSize: document.querySelector("#attention-page-size"),
   attentionSeverity: document.querySelector("#attention-severity"),
@@ -188,6 +191,14 @@ async function getJSON(path) {
   return response.json();
 }
 
+function adminPath(path, params = new URLSearchParams()) {
+  if (state.environment && state.environment !== "production") {
+    params.set("environment", state.environment);
+  }
+  const query = params.toString();
+  return query ? `${path}?${query}` : path;
+}
+
 function showError(error) {
   el.error.textContent = error instanceof Error ? error.message : "Unable to load admin metadata.";
   el.error.hidden = false;
@@ -239,16 +250,20 @@ function offsetForPage(page, limit) {
 
 function resetPages() {
   state.devicePage = 1;
+  state.attentionPage = 1;
   state.findingsPage = 1;
   state.runPage = 1;
   state.inventoryPage = 1;
   state.detailInventoryPage = 1;
+  state.normalizationPage = 1;
 }
 
 function applyUrlStateFromLocation() {
   const url = new URL(window.location.href);
   const params = url.searchParams;
   state.selectedDeviceId = deviceIdFromPath(url.pathname);
+  state.environment = environments.has(params.get("environment")) ? params.get("environment") : "production";
+  setSelectValue(el.environment, state.environment, "production");
   state.devicePageSize = pageSizeFromValue(params.get("device_page_size") || params.get("page_size"), storedPageSize("devicePageSize"));
   state.attentionPageSize = pageSizeFromValue(params.get("attention_page_size") || params.get("page_size"), storedPageSize("attentionPageSize"));
   state.findingsPageSize = pageSizeFromValue(params.get("findings_page_size") || params.get("page_size"), storedPageSize("findingsPageSize"));
@@ -314,6 +329,7 @@ function currentAdminPath() {
   url.pathname = state.selectedDeviceId ? `/admin/devices/${encodeURIComponent(state.selectedDeviceId)}` : "/admin/";
   url.search = "";
   const params = url.searchParams;
+  setParamIfValue(params, "environment", state.environment, "production");
   setPageSizeParam(params, "device_page_size", state.devicePageSize);
   setParamIfValue(params, "device_status", el.deviceStatus.value, "active");
   setPageParam(params, "device_page", state.devicePage);
@@ -422,7 +438,7 @@ async function setPageSize(stateKey, pageKey, select, loader) {
 }
 
 async function loadOverview() {
-  const overview = await getJSON("/v1/ui/admin/overview");
+  const overview = await getJSON(adminPath("/v1/ui/admin/overview"));
   text("#metric-devices", formatNumber(overview.devices.total));
   text("#metric-device-detail", `active ${formatNumber(overview.devices.active)} / disabled ${formatNumber(overview.devices.disabled)}`);
   text("#metric-runs", formatNumber(overview.runs.total));
@@ -439,7 +455,7 @@ async function loadAttention() {
   });
   if (el.attentionSeverity.value && el.attentionSeverity.value !== "all") params.set("severity", el.attentionSeverity.value);
   if (el.attentionReason.value) params.set("reason", el.attentionReason.value);
-  const data = await getJSON(`/v1/ui/admin/attention?${params.toString()}`);
+  const data = await getJSON(adminPath("/v1/ui/admin/attention", params));
   state.attentionPage = data.page || state.attentionPage;
   text("#attention-total", formatNumber(data.counts.total));
   text("#attention-critical", formatNumber(data.counts.critical));
@@ -477,7 +493,7 @@ async function loadFindings() {
   if (el.findingProfile.value.trim()) params.set("profile", el.findingProfile.value.trim());
   if (el.findingDevice.value.trim()) params.set("device_id", el.findingDevice.value.trim());
   if (el.findingRun.value.trim()) params.set("run_id", el.findingRun.value.trim());
-  const data = await getJSON(`/v1/ui/admin/findings?${params.toString()}`);
+  const data = await getJSON(adminPath("/v1/ui/admin/findings", params));
   state.findingsPage = data.page || state.findingsPage;
   text("#findings-total", formatNumber(data.counts.total));
   renderPagination(el.findingsPagination, data, "findingsPage");
@@ -501,7 +517,7 @@ async function loadFindings() {
 }
 
 async function loadHealth() {
-  const data = await getJSON("/v1/ui/admin/health");
+  const data = await getJSON(adminPath("/v1/ui/admin/health"));
   text("#health-healthy", formatNumber(data.counts.healthy));
   text("#health-stale", formatNumber(data.counts.stale));
   text("#health-attention", formatNumber(data.counts.attention));
@@ -524,17 +540,22 @@ async function loadHealth() {
 }
 
 async function loadDevices() {
-  const status = encodeURIComponent(el.deviceStatus.value);
-  const data = await getJSON(`/v1/ui/admin/devices?status=${status}&limit=${state.devicePageSize}&offset=${offsetForPage(state.devicePage, state.devicePageSize)}`);
+  const params = new URLSearchParams({
+    status: el.deviceStatus.value,
+    limit: String(state.devicePageSize),
+    offset: String(offsetForPage(state.devicePage, state.devicePageSize))
+  });
+  const data = await getJSON(adminPath("/v1/ui/admin/devices", params));
   state.devicePage = data.page || state.devicePage;
   renderPagination(el.devicesPagination, data, "devicePage");
   if (data.devices.length === 0) {
-    el.devicesBody.innerHTML = '<tr><td colspan="6">No devices found.</td></tr>';
+    el.devicesBody.innerHTML = '<tr><td colspan="7">No devices found.</td></tr>';
     return;
   }
   el.devicesBody.innerHTML = data.devices.map((device) => `
     <tr data-device-id="${escapeHtml(device.device_id)}">
       <td title="${escapeHtml(device.device_id)}">${escapeHtml(shortId(device.device_id))}</td>
+      <td>${escapeHtml(device.environment || "production")}</td>
       <td>${statusBadge(device.status)}</td>
       <td>${formatNumber(device.run_count)}</td>
       <td>${formatNumber(device.batch_count)}</td>
@@ -549,7 +570,7 @@ async function loadRuns() {
   if (state.selectedDeviceId) params.set("device_id", state.selectedDeviceId);
   if (el.runStatus.value) params.set("status", el.runStatus.value);
   if (el.runProfile.value.trim()) params.set("profile", el.runProfile.value.trim());
-  const data = await getJSON(`/v1/ui/admin/runs?${params.toString()}`);
+  const data = await getJSON(adminPath("/v1/ui/admin/runs", params));
   state.runPage = data.page || state.runPage;
   renderPagination(el.runsPagination, data, "runPage");
   if (data.runs.length === 0) {
@@ -594,7 +615,7 @@ async function loadNormalizationJobs() {
   if (el.normalizationPromoted.value) params.set("promoted_current", el.normalizationPromoted.value);
   if (el.normalizationDevice.value.trim()) params.set("device_id", el.normalizationDevice.value.trim());
   if (el.normalizationRun.value.trim()) params.set("run_id", el.normalizationRun.value.trim());
-  const data = await getJSON(`/v1/ui/admin/normalization-jobs?${params.toString()}`);
+  const data = await getJSON(adminPath("/v1/ui/admin/normalization-jobs", params));
   state.normalizationPage = data.page || state.normalizationPage;
   renderPagination(el.normalizationPagination, data, "normalizationPage");
   if (data.normalization_jobs.length === 0) {
@@ -684,7 +705,7 @@ async function loadPackages() {
   if (el.packageQuery.value.trim()) params.set("query", el.packageQuery.value.trim());
   if (el.packageEcosystem.value.trim()) params.set("ecosystem", el.packageEcosystem.value.trim());
   if (el.packageProfile.value.trim()) params.set("profile", el.packageProfile.value.trim());
-  const data = await getJSON(`/v1/ui/admin/packages?${params.toString()}`);
+  const data = await getJSON(adminPath("/v1/ui/admin/packages", params));
   state.inventoryPage = data.page || state.inventoryPage;
   renderPagination(el.packagesPagination, data, "inventoryPage");
   if (data.packages.length === 0) {
@@ -716,7 +737,7 @@ async function loadPackageDetail() {
   });
   if (state.selectedPackageProfile) params.set("profile", state.selectedPackageProfile);
   if (state.selectedPackageDeviceId) params.set("device_id", state.selectedPackageDeviceId);
-  const data = await getJSON(`/v1/ui/admin/packages/detail?${params.toString()}`);
+  const data = await getJSON(adminPath("/v1/ui/admin/packages/detail", params));
   renderPackageDetail(data);
 }
 
@@ -767,6 +788,7 @@ async function loadDeviceDetail(deviceId) {
   el.detail.hidden = false;
   el.detailTitle.textContent = `Device ${shortId(data.device.device_id)}`;
   el.detailSummary.innerHTML = [
+    ["Environment", data.device.environment || "production"],
     ["Status", data.device.status],
     ["Runs", formatNumber(data.device.run_count)],
     ["Batches", formatNumber(data.device.batch_count)],
@@ -823,7 +845,7 @@ async function loadDevicePackages(deviceId = state.selectedDeviceId) {
     offset: String(offsetForPage(state.detailInventoryPage, state.detailInventoryPageSize)),
     view: state.packageView
   });
-  const packages = await getJSON(`/v1/ui/admin/devices/${encodeURIComponent(deviceId)}/packages?${packageParams.toString()}`);
+  const packages = await getJSON(adminPath(`/v1/ui/admin/devices/${encodeURIComponent(deviceId)}/packages`, packageParams));
   state.detailInventoryPage = packages.page || state.detailInventoryPage;
   renderPagination(el.detailPackagesPagination, packages, "detailInventoryPage");
   el.detailPackagesBody.innerHTML = packages.packages.length === 0
@@ -900,6 +922,15 @@ function clearPackageSelection(mode = "push") {
 }
 
 el.refresh.addEventListener("click", refreshAll);
+el.environment.addEventListener("change", () => {
+  state.environment = environments.has(el.environment.value) ? el.environment.value : "production";
+  state.selectedDeviceId = "";
+  resetPages();
+  clearPackageSelection("replace");
+  el.detail.hidden = true;
+  syncUrlState("replace");
+  refreshAll();
+});
 el.devicePageSize.addEventListener("change", () => setPageSize("devicePageSize", "devicePage", el.devicePageSize, loadDevices));
 el.attentionPageSize.addEventListener("change", () => setPageSize("attentionPageSize", "attentionPage", el.attentionPageSize, loadAttention));
 el.findingsPageSize.addEventListener("change", () => setPageSize("findingsPageSize", "findingsPage", el.findingsPageSize, loadFindings));

@@ -52,7 +52,8 @@ as `device_status`, `attention_severity`, `attention_reason`,
 `finding_profile`, `finding_device`, `finding_run`, `inventory_view`,
 `package_query`, `ecosystem`, `profile`,
 `run_status`, `run_profile`, `normalization_status`,
-`normalization_promoted`, `normalization_device`, and `normalization_run`.
+`normalization_promoted`, `normalization_device`, `normalization_run`, and
+`environment`.
 Numbered table pages are recoverable through `device_page`, `attention_page`,
 `findings_page`, `inventory_page`, `run_page`, `normalization_page`, and
 `detail_inventory_page`. The UI defaults to 10 rows per page and lets operators
@@ -61,6 +62,14 @@ are recoverable through `device_page_size`, `attention_page_size`,
 `findings_page_size`, `inventory_page_size`, `run_page_size`,
 `normalization_page_size`, and `detail_inventory_page_size`. Auto-refresh
 remains local browser state and is not encoded in the URL.
+
+Admin metadata views default to `environment=production` so local smoke tests
+and installer validation devices do not pollute operator views. Operators can
+switch the UI to `test` or `all`, and script callers can pass
+`environment=production|test|all` on admin list, overview, health, attention,
+findings, run, normalization, and package endpoints. Device enrollment accepts
+an optional JSON `environment` value of `production` or `test`; omitted values
+are stored as `production`.
 
 Configure these Worker values before using the UI:
 
@@ -204,12 +213,103 @@ Retention responses contain aggregate counts and the cutoff timestamp only. They
 do not expose raw inventory, `summary_json`, R2 object keys, HMAC material,
 Access credentials, local usernames, SIDs, hostnames, or profile paths.
 
+## Device Purge
+
+Operators can purge a specific test or stale disabled device through a guarded
+admin endpoint. Purge is intended for disposable smoke devices and retired
+endpoints after local uninstall/disable, not routine lifecycle control.
+
+Dry-run first:
+
+```powershell
+.\scripts\invoke-device-purge.ps1 `
+  -HiveBaseUrl https://hive.example.com `
+  -DeviceId "<device-id>" `
+  -AccessClientId $env:BUMBLEBEE_HIVE_ACCESS_CLIENT_ID `
+  -AccessClientSecret $env:BUMBLEBEE_HIVE_ACCESS_CLIENT_SECRET `
+  -AdminToken $env:BUMBLEBEE_HIVE_ADMIN_TOKEN
+```
+
+Confirm the purge only after reviewing the aggregate candidate counts:
+
+```powershell
+.\scripts\invoke-device-purge.ps1 `
+  -HiveBaseUrl https://hive.example.com `
+  -DeviceId "<device-id>" `
+  -AccessClientId $env:BUMBLEBEE_HIVE_ACCESS_CLIENT_ID `
+  -AccessClientSecret $env:BUMBLEBEE_HIVE_ACCESS_CLIENT_SECRET `
+  -AdminToken $env:BUMBLEBEE_HIVE_ADMIN_TOKEN `
+  -Reason "remove disposable smoke-test device" `
+  -ConfirmPurge
+```
+
+The underlying endpoint is
+`POST /v1/admin/devices/<device-id>/purge?dry_run=true|false`. Destructive
+runs require `confirm_device_id` to match the route device ID and require a
+non-empty reason. Production devices must be disabled before they can be purged;
+test devices may be purged directly. Purge deletes the device row, lifecycle
+events, runs, batches, normalized inventory, findings, and matching raw R2
+objects. If any raw object delete fails, Hive returns `ok:false` and leaves D1
+metadata in place for a later retry.
+
+Purge responses contain aggregate counts only. They do not expose raw
+inventory, `summary_json`, R2 object keys, HMAC material, Access credentials,
+local usernames, SIDs, hostnames, or profile paths.
+
+## Catalog Publishing
+
+Hive can publish the current Bumblebee exposure catalog to enrolled devices.
+Script/operator callers use `POST /v1/admin/catalog/current` with the existing
+Cloudflare Access Service Auth headers and `X-Hive-Admin-Token`. The request
+body is a JSON object with a source label and one or more JSON catalog files:
+
+```json
+{
+  "source": "upstream-threat-intel",
+  "files": [
+    {
+      "path": "example-advisory.json",
+      "content": "{\"schema_version\":\"0.1.0\",\"entries\":[]}"
+    }
+  ]
+}
+```
+
+Hive validates every file as a Bumblebee exposure catalog before promoting it,
+stores file hashes and release metadata in D1, and serves the active bundle from
+`GET /v1/catalog/current` to active enrolled devices. Device catalog reads use
+the same Access service headers plus `X-Inventory-Device-Id`; disabled or
+unknown devices are rejected.
+
+Hive can also sync directly from an upstream Bumblebee `threat_intel`
+directory. Trigger it manually with:
+
+```powershell
+Invoke-RestMethod `
+  -Method Post `
+  -Uri "https://hive.example.com/v1/admin/catalog/sync-upstream" `
+  -Headers $headers
+```
+
+Set `CATALOG_UPSTREAM_SYNC_ENABLED=true` to run the same sync from the
+scheduled Worker. By default, Hive reads the public
+`perplexityai/bumblebee/threat_intel` directory through GitHub's repository
+contents API. Operators can override the source with:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `CATALOG_UPSTREAM_SYNC_ENABLED` | unset | Enables scheduled upstream catalog sync when `true`, `1`, or `yes`. |
+| `CATALOG_UPSTREAM_CONTENTS_URL` | `https://api.github.com/repos/perplexityai/bumblebee/contents/threat_intel?ref=main` | Contents API URL for the upstream catalog directory. |
+| `CATALOG_UPSTREAM_SOURCE` | `perplexityai/bumblebee/threat_intel` | Source label stored on the promoted catalog release. |
+| `CATALOG_UPSTREAM_FILE_LIMIT` | `100` | Maximum upstream JSON files to fetch per sync. |
+
 ## Windows Bootstrapper
 
 The self-service installer downloads Bumblebee, verifies the release checksum,
-enrolls the endpoint with Hive, stores secrets with Windows DPAPI-backed
-`Export-Clixml`, writes a scheduled-run wrapper, and optionally registers a
-current-user scheduled task.
+enrolls the endpoint with `bumblebee hive join`, writes the Hive
+compatibility-layer `config.json` and `secrets.json`, writes a scheduled
+`bumblebee hive run` wrapper, and optionally registers a current-user scheduled
+task.
 
 Dry-run the installer:
 
@@ -247,13 +347,14 @@ npx wrangler secret put ENROLLMENT_TOKEN
 ```
 
 The generated wrapper passes gateway headers through Bumblebee's generic
-`--http-header-env` support and uses Bumblebee HMAC for payload integrity.
-The default generated scan profile is `baseline`; tests and bounded campaign
-installs can pass `-ScanProfile project -ScanRoot <path>`.
+Hive config/secrets path and uses Bumblebee HMAC for payload integrity. The
+default generated scan profile is `baseline`; tests and bounded campaign
+installs can pass `-Environment test -ScanProfile project -ScanRoot <path>`.
+The installer reuses an existing local Hive identity by default when rerun.
 
 Uninstall removes only local generated state: the scheduled task, wrapper,
-DPAPI secrets, config, and installed `bumblebee.exe`. Remote Hive device
-disable/revoke is a separate operator action.
+Hive secrets, config, and installed `bumblebee.exe`. Remote Hive device
+disable/revoke/purge is a separate operator action.
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-bumblebee.ps1 `
@@ -329,16 +430,17 @@ $headers = @{
 
 Supported endpoints:
 
-- `GET /v1/admin/overview`
-- `GET /v1/admin/attention?severity=all|critical|warning&reason=<reason>&limit=10&offset=0`
-- `GET /v1/admin/findings?severity=critical&catalog_id=<catalog-id>&ecosystem=npm&query=<package>&device_id=<device-id>&profile=baseline&run_id=<run-id>&limit=10&offset=0`
-- `GET /v1/admin/devices?status=active|disabled|all&limit=50&offset=0`
+- `GET /v1/admin/overview?environment=production|test|all`
+- `GET /v1/admin/attention?environment=production|test|all&severity=all|critical|warning&reason=<reason>&limit=10&offset=0`
+- `GET /v1/admin/findings?environment=production|test|all&severity=critical&catalog_id=<catalog-id>&ecosystem=npm&query=<package>&device_id=<device-id>&profile=baseline&run_id=<run-id>&limit=10&offset=0`
+- `GET /v1/admin/devices?environment=production|test|all&status=active|disabled|all&limit=50&offset=0`
 - `GET /v1/admin/devices/<device-id>`
-- `GET /v1/admin/runs?device_id=<device-id>&status=complete&profile=baseline&limit=50&offset=0`
-- `GET /v1/admin/normalization-jobs?status=complete&device_id=<device-id>&run_id=<run-id>&promoted_current=true&limit=50&offset=0`
-- `GET /v1/admin/packages?query=<name>&ecosystem=npm&profile=baseline&view=package|summary|observations&limit=50&offset=0`
-- `GET /v1/admin/packages/detail?name=<normalized-name>&ecosystem=npm&profile=baseline&device_id=<device-id>`
-- `GET /v1/admin/devices/<device-id>/packages?profile=baseline&view=package|summary|observations&limit=50&offset=0`
+- `POST /v1/admin/devices/<device-id>/purge?dry_run=true|false`
+- `GET /v1/admin/runs?environment=production|test|all&device_id=<device-id>&status=complete&profile=baseline&limit=50&offset=0`
+- `GET /v1/admin/normalization-jobs?environment=production|test|all&status=complete&device_id=<device-id>&run_id=<run-id>&promoted_current=true&limit=50&offset=0`
+- `GET /v1/admin/packages?environment=production|test|all&query=<name>&ecosystem=npm&profile=baseline&view=package|summary|observations&limit=50&offset=0`
+- `GET /v1/admin/packages/detail?environment=production|test|all&name=<normalized-name>&ecosystem=npm&profile=baseline&device_id=<device-id>`
+- `GET /v1/admin/devices/<device-id>/packages?environment=production|test|all&profile=baseline&view=package|summary|observations&limit=50&offset=0`
 
 List endpoints return additive pagination metadata alongside existing arrays:
 `limit`, `offset`, `total`, `page`, `page_count`, and `has_more`.
@@ -512,6 +614,7 @@ Example response:
       "device_id": "device-redacted",
       "created_at": "2026-05-26T18:30:00.000Z",
       "disabled_at": null,
+      "environment": "production",
       "status": "active",
       "run_count": 3,
       "batch_count": 3,
@@ -531,7 +634,8 @@ Example response:
   "page": 1,
   "page_count": 1,
   "has_more": false,
-  "status": "active"
+  "status": "active",
+  "environment": "production"
 }
 ```
 
@@ -666,9 +770,9 @@ SIDs, `source_file`, `project_path`, or local profile paths.
 
 Use `scripts\verify-bumblebee-pilot.ps1` on a pilot Windows host after the
 bootstrapper has installed Bumblebee, enrolled Hive, and registered the scheduled
-task. The verifier reads the local Bumblebee config, decrypts only the local
-DPAPI-protected secrets needed for the check, calls Hive admin metadata
-endpoints including findings visibility, and emits redacted JSON.
+task. The verifier reads the local Hive compatibility-layer config and local
+`secrets.json`, calls Hive admin metadata endpoints including findings
+visibility for the configured device environment, and emits redacted JSON.
 
 The verifier intentionally does not print secrets, raw inventory, raw HTTP
 payloads, raw device IDs, usernames, SIDs, hostnames, full profile paths, R2
@@ -708,7 +812,9 @@ powershell -NoProfile -ExecutionPolicy Bypass `
 
 A successful `CheckOnly` result proves:
 
-- local config, local DPAPI secrets, wrapper script, and binary are present;
+- local Hive config, local Hive secrets, wrapper script, cache root, and binary
+  are present;
+- the wrapper invokes `bumblebee hive run` with explicit config and cache roots;
 - `bumblebee.exe selftest` exits `0`;
 - the scheduled task exists and its last result is `0`;
 - Hive admin overview, attention, device, run, device-detail, and normalization-job
@@ -727,8 +833,12 @@ filter and does not print it.
 
 If verification fails:
 
-- `missing_config`, `local_secrets_present`, or `run_script_present` failures
+- `missing_config`, `local_hive_secrets_present`, or `run_script_present` failures
   usually mean the bootstrapper did not finish or was run with different roots.
+- `run_script_uses_hive_run`, `configured_base_url_present`,
+  `configured_ingest_path`, or `configured_environment` failures usually mean
+  the host still has legacy direct-ingest installer state or a hand-edited
+  config.
 - `selftest_failed` means the installed Bumblebee binary should be repaired
   before debugging Hive.
 - `admin_endpoint_failed_*` usually means Cloudflare Access service auth,

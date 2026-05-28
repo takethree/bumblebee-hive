@@ -66,6 +66,7 @@ powershell -NoProfile -ExecutionPolicy Bypass `
   -EnrollmentToken $env:ENROLLMENT_TOKEN `
   -InstallRoot "$env:LOCALAPPDATA\Programs\Bumblebee" `
   -ConfigRoot "$env:APPDATA\Bumblebee" `
+  -CacheRoot "$env:LOCALAPPDATA\Bumblebee\catalog-cache" `
   -TaskName "Bumblebee Baseline Pilot" `
   -WhatIf
 ```
@@ -87,13 +88,16 @@ powershell -NoProfile -ExecutionPolicy Bypass `
   -EnrollmentToken $env:ENROLLMENT_TOKEN `
   -InstallRoot "$env:LOCALAPPDATA\Programs\Bumblebee" `
   -ConfigRoot "$env:APPDATA\Bumblebee" `
+  -CacheRoot "$env:LOCALAPPDATA\Bumblebee\catalog-cache" `
   -TaskName "Bumblebee Baseline Pilot"
 ```
 
 The installer downloads the Windows release asset, verifies `checksums.txt`,
-runs `bumblebee.exe selftest`, enrolls the endpoint with Hive, writes local
-DPAPI-protected secrets, writes the baseline wrapper, and registers the current
-user scheduled task.
+runs `bumblebee.exe selftest`, enrolls the endpoint with `bumblebee hive join`,
+writes local Hive `config.json` and `secrets.json`, writes the `bumblebee hive
+run` wrapper, and registers the current-user scheduled task. Rerunning the
+installer reuses the existing local Hive identity unless the local config is
+removed first.
 
 ## Verify Without Sending Inventory
 
@@ -110,10 +114,11 @@ powershell -NoProfile -ExecutionPolicy Bypass `
   -WorkersDevUrl "https://bumblebee-hive.<account-subdomain>.workers.dev"
 ```
 
-`CheckOnly` validates local config, local DPAPI secret material, wrapper script,
-configured binary, device ID presence, `/v1/ingest` target shape, scan profile,
-`bumblebee.exe selftest`, scheduled-task presence, last task result, Hive admin
-metadata reachability, dashboard asset availability, normalization-job
+`CheckOnly` validates local Hive config, local Hive secret material, wrapper
+script, expected binary, cache root, device ID presence, `/v1/ingest` target
+shape, device environment, scan profile, `bumblebee.exe selftest`,
+scheduled-task presence, last task result, Hive admin metadata reachability for
+the configured environment, dashboard asset availability, normalization-job
 visibility, device-detail recent normalization visibility, and optional
 workers.dev disabled posture. It emits redacted JSON and does not send
 inventory.
@@ -187,3 +192,9 @@ script admin endpoint or the Hive admin UI as documented in the Hive README.
 Use a short audit reason. Re-enable is available for mistakes or returning
 devices; neither action deletes local state, raw batches, runs, or HMAC
 material.
+
+For disposable smoke-test devices or stale disabled devices that should be
+removed from Hive entirely, use the guarded purge workflow in the Hive README.
+Always run `scripts\invoke-device-purge.ps1` without `-ConfirmPurge` first and
+review the aggregate counts. Confirmed purge requires a reason and device-ID
+confirmation. Production devices must be disabled before purge.

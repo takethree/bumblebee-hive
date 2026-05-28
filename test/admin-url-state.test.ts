@@ -53,6 +53,8 @@ function makeHarness(initialURL: string): {
     }
     return found;
   };
+  element("environment").value = "production";
+  element("environment").options = [{ value: "production" }, { value: "test" }, { value: "all" }];
   element("device-status").value = "active";
   element("device-status").options = [{ value: "active" }, { value: "disabled" }, { value: "all" }];
   element("attention-severity").value = "all";
@@ -244,6 +246,21 @@ describe("admin URL state", () => {
     expect(admin.currentAdminPath()).toBe("/admin/devices/device-3?inventory_view=observations&run_status=error");
     expect(harness.packageViewInputs.find((input) => input.value === "observations")?.checked).toBe(true);
     expect(harness.listeners.has("popstate")).toBe(true);
+  });
+
+  it("keeps environment state in the URL and admin data requests", async () => {
+    const harness = makeHarness("https://hive.example.test/admin/?environment=test&inventory_view=package");
+    const admin = await loadAdminApp(harness);
+
+    expect(harness.elements.get("environment")?.value).toBe("test");
+    expect(admin.currentAdminPath()).toBe("/admin/?environment=test&inventory_view=package");
+    expect((harness.context.__fetchLog as string[]).some((path) => path.includes("environment=test"))).toBe(true);
+
+    harness.elements.get("environment")!.value = "all";
+    await harness.elements.get("environment")!.listeners.get("change")?.({} as Event);
+
+    expect(admin.currentAdminPath()).toBe("/admin/?environment=all&inventory_view=package");
+    expect(harness.replaces.at(-1)).toBe("/admin/?environment=all&inventory_view=package");
   });
 
   it("hydrates pagination params and pushes page changes into the URL", async () => {

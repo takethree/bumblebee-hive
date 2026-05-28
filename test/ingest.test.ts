@@ -80,8 +80,17 @@ class MemoryStmt {
       const device = this.db.devices.get(String(this.values[0]));
       return device ? { disabled_at: device.disabled_at } as T : null;
     }
+    if (this.sql.startsWith("SELECT device_id, environment, disabled_at FROM devices")) {
+      const deviceID = String(this.values[0]);
+      const device = this.db.devices.get(deviceID);
+      return device ? {
+        device_id: deviceID,
+        environment: device.environment,
+        disabled_at: device.disabled_at
+      } as T : null;
+    }
     if (this.sql.startsWith("SELECT COUNT(*) AS total_devices")) {
-      const devices = [...this.db.devices.values()];
+      const devices = this.filteredDevicesForOverview();
       return {
         total_devices: devices.length,
         active_devices: devices.filter((device) => !device.disabled_at).length,
@@ -89,17 +98,19 @@ class MemoryStmt {
       } as T;
     }
     if (this.sql.startsWith("SELECT COUNT(*) AS total_runs")) {
-      const received = this.db.runRows().map((run) => run.received_at).sort();
+      const rows = this.filteredRowsByEnvironment(this.db.runRows());
+      const received = rows.map((run) => run.received_at).sort();
       return {
-        total_runs: this.db.runs.length,
-        complete_runs: this.db.runRows().filter((run) => run.status === "complete").length,
+        total_runs: rows.length,
+        complete_runs: rows.filter((run) => run.status === "complete").length,
         latest_run_received_at: received.at(-1) || null
       } as T;
     }
     if (this.sql.startsWith("SELECT COUNT(*) AS total_batches")) {
+      const rows = this.filteredRowsByEnvironment(this.db.batchRows());
       return {
-        total_batches: this.db.batches.length,
-        total_records: this.db.batchRows().reduce((total, batch) => total + batch.record_count, 0)
+        total_batches: rows.length,
+        total_records: rows.reduce((total, batch) => total + batch.record_count, 0)
       } as T;
     }
     if (this.sql.startsWith("SELECT COUNT(*) AS total FROM devices d")) {
@@ -109,7 +120,11 @@ class MemoryStmt {
       } else if (this.sql.includes("WHERE d.disabled_at IS NOT NULL")) {
         rows = rows.filter((row) => row.disabled_at);
       }
+      rows = this.filterDeviceRows(rows);
       return { total: rows.length } as T;
+    }
+    if (this.sql.startsWith("SELECT COUNT(*) AS total FROM ") && this.sql.includes(" WHERE device_id = ?")) {
+      return { total: this.countRowsForDevice() } as T;
     }
     if (this.sql.startsWith("SELECT COUNT(*) AS total FROM runs r")) {
       return { total: this.filteredRunRows().length } as T;
@@ -148,11 +163,33 @@ class MemoryStmt {
         .filter((job) => job.device_id === deviceID && job.run_id === runID)
         .sort((left, right) => right.started_at.localeCompare(left.started_at))[0] || null) as T | null;
     }
+    if (this.sql.startsWith("SELECT release_id, source, schema_version, file_count, entry_count, bundle_sha256, published_at FROM catalog_releases")) {
+      return (this.db.catalogReleaseRows()
+        .filter((release) => release.active === 1)
+        .sort((left, right) => right.published_at.localeCompare(left.published_at))[0] || null) as T | null;
+    }
     return null;
   }
 
   async all<T>(): Promise<{ results: T[] }> {
+    if (this.sql.startsWith("SELECT release_id, path, sha256, entry_count, content_json FROM catalog_files")) {
+      const releaseID = String(this.values[0]);
+      return {
+        results: this.db.catalogFileRows()
+          .filter((file) => file.release_id === releaseID)
+          .sort((left, right) => left.path.localeCompare(right.path)) as T[]
+      };
+    }
     if (this.sql.startsWith("SELECT batch_id, object_key")) {
+      if (this.sql.includes("WHERE device_id = ?")) {
+        const deviceID = String(this.values[0]);
+        return {
+          results: this.db.batchRows()
+            .filter((row) => row.device_id === deviceID)
+            .sort((left, right) => left.received_at.localeCompare(right.received_at))
+            .map((row) => ({ batch_id: row.batch_id, object_key: row.object_key })) as T[]
+        };
+      }
       const cutoff = String(this.values[0]);
       const limit = Number(this.values[1]);
       const rows = this.db.batchRows()
@@ -174,7 +211,7 @@ class MemoryStmt {
     }
     if (this.sql.includes("last_complete_received_at")) {
       const profile = String(this.values[0]);
-      return { results: this.db.healthRows(profile) as T[] };
+      return { results: this.filterDeviceRows(this.db.healthRows(profile)) as T[] };
     }
     if (this.sql.includes("FROM devices d")) {
       let rows = this.db.adminDeviceRows();
@@ -183,6 +220,7 @@ class MemoryStmt {
       } else if (this.sql.includes("WHERE d.disabled_at IS NOT NULL")) {
         rows = rows.filter((row) => row.disabled_at);
       }
+      rows = this.filterDeviceRows(rows);
       return { results: this.page(rows) as T[] };
     }
     if (this.sql.includes("FROM device_lifecycle_events")) {
@@ -204,49 +242,11 @@ class MemoryStmt {
       return { results: this.page(rows) as T[] };
     }
     if (this.sql.includes("FROM runs r")) {
-      let rows = this.db.adminRunRows();
-      let valueIndex = 0;
-      if (this.sql.includes("r.device_id = ?")) {
-        const deviceID = String(this.values[valueIndex++]);
-        rows = rows.filter((row) => row.device_id === deviceID);
-      }
-      if (this.sql.includes("r.status = ?")) {
-        const status = String(this.values[valueIndex++]);
-        rows = rows.filter((row) => row.status === status);
-      }
-      if (this.sql.includes("r.profile = ?")) {
-        const profile = String(this.values[valueIndex++]);
-        rows = rows.filter((row) => row.profile === profile);
-      }
+      const rows = this.filteredRunRows();
       return { results: this.page(rows) as T[] };
     }
     if (this.sql.includes("FROM inventory_current")) {
-      let rows = this.db.currentRows();
-      let valueIndex = 0;
-      if (this.sql.includes("device_id = ?")) {
-        const deviceID = String(this.values[valueIndex++]);
-        rows = rows.filter((row) => row.device_id === deviceID);
-      }
-      if (this.sql.includes("ecosystem = ?")) {
-        const ecosystem = String(this.values[valueIndex++]);
-        rows = rows.filter((row) => row.ecosystem === ecosystem);
-      }
-      if (this.sql.includes("profile = ?")) {
-        const profile = String(this.values[valueIndex++]);
-        rows = rows.filter((row) => row.profile === profile);
-      }
-      if (this.sql.includes("normalized_name = ?")) {
-        const name = String(this.values[valueIndex++]);
-        rows = rows.filter((row) => row.normalized_name === name);
-      }
-      if (this.sql.includes("normalized_name LIKE ?")) {
-        const query = String(this.values[valueIndex++]).replace(/^%|%$/g, "").toLowerCase();
-        valueIndex++;
-        rows = rows.filter((row) =>
-          row.normalized_name.toLowerCase().includes(query) ||
-          row.package_name.toLowerCase().includes(query)
-        );
-      }
+      const rows = this.filteredCurrentRows();
       if (this.sql.includes("WITH family_page")) {
         const familyRows = this.page(this.packageFamilyRows(rows));
         const familyKeys = new Set(familyRows.map((row) => this.packageFamilyKey(row)));
@@ -269,7 +269,8 @@ class MemoryStmt {
         hmac_key_ciphertext: String(this.values[1]),
         hmac_key_nonce: String(this.values[2]),
         created_at: String(this.values[3]),
-        disabled_at: null
+        disabled_at: null,
+        environment: String(this.values[4] || "production") as "production" | "test"
       });
     } else if (this.sql.startsWith("INSERT INTO batches")) {
       this.db.batches.push(this.values);
@@ -345,10 +346,10 @@ class MemoryStmt {
       this.db.exposureFindings.set(key, this.values);
     } else if (this.sql.startsWith("DELETE FROM inventory_current")) {
       const deviceID = String(this.values[0]);
-      const profile = String(this.values[1]);
+      const profile = this.sql.includes("AND profile = ?") ? String(this.values[1]) : "";
       const before = this.db.inventoryCurrent.size;
       for (const [key, row] of [...this.db.inventoryCurrent.entries()]) {
-        if (String(row[0]) === deviceID && String(row[1]) === profile) {
+        if (String(row[0]) === deviceID && (!profile || String(row[1]) === profile)) {
           this.db.inventoryCurrent.delete(key);
         }
       }
@@ -388,11 +389,21 @@ class MemoryStmt {
         }
       }
       return { success: true, meta: { duration: 0, changes } } as D1Result;
+    } else if (this.sql.startsWith("DELETE FROM batches WHERE device_id = ?")) {
+      const deviceID = String(this.values[0]);
+      const before = this.db.batches.length;
+      this.db.batches = this.db.batches.filter((batch) => String(batch[1]) !== deviceID);
+      return { success: true, meta: { duration: 0, changes: before - this.db.batches.length } } as D1Result;
     } else if (this.sql.startsWith("DELETE FROM batches")) {
       const ids = new Set(this.values.map(String));
       const before = this.db.batches.length;
       this.db.batches = this.db.batches.filter((batch) => !ids.has(String(batch[0])));
       return { success: true, meta: { duration: 0, changes: before - this.db.batches.length } } as D1Result;
+    } else if (this.sql.startsWith("DELETE FROM runs WHERE device_id = ?")) {
+      const deviceID = String(this.values[0]);
+      const before = this.db.runs.length;
+      this.db.runs = this.db.runs.filter((run) => String(run[0]) !== deviceID);
+      return { success: true, meta: { duration: 0, changes: before - this.db.runs.length } } as D1Result;
     } else if (this.sql.startsWith("DELETE FROM runs")) {
       const triples: Array<{ device_id: string; profile: string; run_id: string }> = [];
       for (let i = 0; i < this.values.length; i += 3) {
@@ -409,8 +420,87 @@ class MemoryStmt {
         triple.run_id === String(run[2])
       ));
       return { success: true, meta: { duration: 0, changes: before - this.db.runs.length } } as D1Result;
+    } else if (this.sql.startsWith("DELETE FROM exposure_findings WHERE device_id = ?")) {
+      return this.deleteMapRowsByDevice(this.db.exposureFindings);
+    } else if (this.sql.startsWith("DELETE FROM inventory_records WHERE device_id = ?")) {
+      return this.deleteMapRowsByDevice(this.db.inventoryRecords);
+    } else if (this.sql.startsWith("DELETE FROM normalization_jobs WHERE device_id = ?")) {
+      return this.deleteMapRowsByDevice(this.db.normalizationJobs, 1);
+    } else if (this.sql.startsWith("DELETE FROM device_lifecycle_events WHERE device_id = ?")) {
+      const deviceID = String(this.values[0]);
+      const before = this.db.lifecycleEvents.length;
+      this.db.lifecycleEvents = this.db.lifecycleEvents.filter((event) => String(event[1]) !== deviceID);
+      return { success: true, meta: { duration: 0, changes: before - this.db.lifecycleEvents.length } } as D1Result;
+    } else if (this.sql.startsWith("DELETE FROM devices WHERE device_id = ?")) {
+      const deviceID = String(this.values[0]);
+      const existed = this.db.devices.delete(deviceID);
+      return { success: true, meta: { duration: 0, changes: existed ? 1 : 0 } } as D1Result;
+    } else if (this.sql.startsWith("INSERT OR REPLACE INTO catalog_releases")) {
+      const [releaseID] = this.values.map(String);
+      this.db.catalogReleases = this.db.catalogReleases.filter((release) => String(release[0]) !== releaseID);
+      this.db.catalogReleases.push(this.values);
+    } else if (this.sql.startsWith("DELETE FROM catalog_files")) {
+      const releaseID = String(this.values[0]);
+      const before = this.db.catalogFiles.length;
+      this.db.catalogFiles = this.db.catalogFiles.filter((file) => String(file[0]) !== releaseID);
+      return { success: true, meta: { duration: 0, changes: before - this.db.catalogFiles.length } } as D1Result;
+    } else if (this.sql.startsWith("INSERT INTO catalog_files")) {
+      this.db.catalogFiles.push(this.values);
+    } else if (this.sql.startsWith("UPDATE catalog_releases SET active = 0")) {
+      for (const release of this.db.catalogReleases) {
+        release[7] = 0;
+      }
+    } else if (this.sql.startsWith("UPDATE catalog_releases SET active = 1")) {
+      const releaseID = String(this.values[0]);
+      for (const release of this.db.catalogReleases) {
+        if (String(release[0]) === releaseID) {
+          release[7] = 1;
+        }
+      }
     }
     return { success: true, meta: { duration: 0 } } as D1Result;
+  }
+
+  private environmentValue(): "production" | "test" | null {
+    if (this.sql.includes("environment = 'production'")) {
+      return "production";
+    }
+    if (this.sql.includes("env_d.environment = ?")) {
+      return String(this.values[0]) as "production" | "test";
+    }
+    if (this.sql.includes("d.environment = ?")) {
+      const index = this.sql.includes("last_complete_received_at") ? this.values.length - 1 : 0;
+      return String(this.values[index]) as "production" | "test";
+    }
+    if (this.sql.includes("WHERE environment = ?")) {
+      return String(this.values[0]) as "production" | "test";
+    }
+    return null;
+  }
+
+  private valueIndexAfterEnvironment(): number {
+    return this.sql.includes("env_d.environment = ?") ? 1 : 0;
+  }
+
+  private filteredDevicesForOverview(): Array<{ disabled_at: string | null; environment: "production" | "test" }> {
+    const environment = this.environmentValue();
+    return [...this.db.devices.values()].filter((device) => !environment || device.environment === environment);
+  }
+
+  private filterDeviceRows<T extends { device_id: string; environment?: "production" | "test" }>(rows: T[]): T[] {
+    const environment = this.environmentValue();
+    if (!environment) {
+      return rows;
+    }
+    return rows.filter((row) => (row.environment || this.db.devices.get(row.device_id)?.environment || "production") === environment);
+  }
+
+  private filteredRowsByEnvironment<T extends { device_id: string }>(rows: T[]): T[] {
+    const environment = this.environmentValue();
+    if (!environment) {
+      return rows;
+    }
+    return rows.filter((row) => (this.db.devices.get(row.device_id)?.environment || "production") === environment);
   }
 
   private page<T>(rows: T[]): T[] {
@@ -424,8 +514,8 @@ class MemoryStmt {
   }
 
   private filteredRunRows(): ReturnType<MemoryD1["adminRunRows"]> {
-    let rows = this.db.adminRunRows();
-    let valueIndex = 0;
+    let rows = this.filteredRowsByEnvironment(this.db.adminRunRows());
+    let valueIndex = this.valueIndexAfterEnvironment();
     if (this.sql.includes("r.device_id = ?")) {
       const deviceID = String(this.values[valueIndex++]);
       rows = rows.filter((row) => row.device_id === deviceID);
@@ -442,8 +532,8 @@ class MemoryStmt {
   }
 
   private filteredNormalizationJobRows(): ReturnType<MemoryD1["normalizationJobRows"]> {
-    let rows = this.db.normalizationJobRows();
-    let valueIndex = 0;
+    let rows = this.filteredRowsByEnvironment(this.db.normalizationJobRows());
+    let valueIndex = this.valueIndexAfterEnvironment();
     if (this.sql.includes("device_id = ?")) {
       const deviceID = String(this.values[valueIndex++]);
       rows = rows.filter((row) => row.device_id === deviceID);
@@ -464,8 +554,8 @@ class MemoryStmt {
   }
 
   private filteredFindingRows(): ReturnType<MemoryD1["findingRows"]> {
-    let rows = this.db.findingRows();
-    let valueIndex = 0;
+    let rows = this.filteredRowsByEnvironment(this.db.findingRows());
+    let valueIndex = this.valueIndexAfterEnvironment();
     if (this.sql.includes("device_id = ?")) {
       const deviceID = String(this.values[valueIndex++]);
       rows = rows.filter((row) => row.device_id === deviceID);
@@ -502,8 +592,8 @@ class MemoryStmt {
   }
 
   private filteredCurrentRows(): ReturnType<MemoryD1["currentRows"]> {
-    let rows = this.db.currentRows();
-    let valueIndex = 0;
+    let rows = this.filteredRowsByEnvironment(this.db.currentRows());
+    let valueIndex = this.valueIndexAfterEnvironment();
     if (this.sql.includes("device_id = ?")) {
       const deviceID = String(this.values[valueIndex++]);
       rows = rows.filter((row) => row.device_id === deviceID);
@@ -528,6 +618,43 @@ class MemoryStmt {
       );
     }
     return rows;
+  }
+
+  private countRowsForDevice(): number {
+    const deviceID = String(this.values[0]);
+    if (this.sql.includes("FROM batches")) {
+      return this.db.batchRows().filter((row) => row.device_id === deviceID).length;
+    }
+    if (this.sql.includes("FROM runs")) {
+      return this.db.runRows().filter((row) => row.device_id === deviceID).length;
+    }
+    if (this.sql.includes("FROM normalization_jobs")) {
+      return this.db.normalizationJobRows().filter((row) => row.device_id === deviceID).length;
+    }
+    if (this.sql.includes("FROM inventory_records")) {
+      return this.db.inventoryRecordRows().filter((row) => row.device_id === deviceID).length;
+    }
+    if (this.sql.includes("FROM inventory_current")) {
+      return this.db.currentRows().filter((row) => row.device_id === deviceID).length;
+    }
+    if (this.sql.includes("FROM exposure_findings")) {
+      return this.db.findingRows().filter((row) => row.device_id === deviceID).length;
+    }
+    if (this.sql.includes("FROM device_lifecycle_events")) {
+      return this.db.lifecycleEventRows(deviceID).length;
+    }
+    return 0;
+  }
+
+  private deleteMapRowsByDevice(rows: Map<string, unknown[]>, deviceIndex = 0): D1Result {
+    const deviceID = String(this.values[0]);
+    const before = rows.size;
+    for (const [key, row] of [...rows.entries()]) {
+      if (String(row[deviceIndex]) === deviceID) {
+        rows.delete(key);
+      }
+    }
+    return { success: true, meta: { duration: 0, changes: before - rows.size } } as D1Result;
   }
 
   private sortValue(row: unknown): string {
@@ -672,7 +799,7 @@ class MemoryStmt {
 }
 
 class MemoryD1 {
-  devices = new Map<string, { hmac_key_ciphertext: string; hmac_key_nonce: string; created_at: string; disabled_at: string | null }>();
+  devices = new Map<string, { hmac_key_ciphertext: string; hmac_key_nonce: string; created_at: string; disabled_at: string | null; environment: "production" | "test" }>();
   batches: unknown[][] = [];
   runs: unknown[][] = [];
   lifecycleEvents: unknown[][] = [];
@@ -680,6 +807,8 @@ class MemoryD1 {
   inventoryRecords = new Map<string, unknown[]>();
   inventoryCurrent = new Map<string, unknown[]>();
   exposureFindings = new Map<string, unknown[]>();
+  catalogReleases: unknown[][] = [];
+  catalogFiles: unknown[][] = [];
 
   prepare(sql: string): MemoryStmt {
     return new MemoryStmt(this, sql);
@@ -739,6 +868,44 @@ class MemoryD1 {
     }));
   }
 
+  catalogReleaseRows(): Array<{
+    release_id: string;
+    source: string | null;
+    schema_version: string;
+    file_count: number;
+    entry_count: number;
+    bundle_sha256: string;
+    published_at: string;
+    active: number;
+  }> {
+    return this.catalogReleases.map((release) => ({
+      release_id: String(release[0]),
+      source: release[1] === null || release[1] === undefined ? null : String(release[1]),
+      schema_version: String(release[2]),
+      file_count: Number(release[3]),
+      entry_count: Number(release[4]),
+      bundle_sha256: String(release[5]),
+      published_at: String(release[6]),
+      active: Number(release[7])
+    }));
+  }
+
+  catalogFileRows(): Array<{
+    release_id: string;
+    path: string;
+    sha256: string;
+    entry_count: number;
+    content_json: string;
+  }> {
+    return this.catalogFiles.map((file) => ({
+      release_id: String(file[0]),
+      path: String(file[1]),
+      sha256: String(file[2]),
+      entry_count: Number(file[3]),
+      content_json: String(file[4])
+    }));
+  }
+
   adminDeviceRows(): Array<{
     device_id: string;
     created_at: string;
@@ -751,6 +918,7 @@ class MemoryD1 {
     last_run_status: string | null;
     last_run_scanner_version: string | null;
     last_run_received_at: string | null;
+    environment: "production" | "test";
   }> {
     const runs = this.runRows();
     const batches = this.batchRows();
@@ -770,7 +938,8 @@ class MemoryD1 {
         last_run_profile: lastRun?.profile || null,
         last_run_status: lastRun?.status || null,
         last_run_scanner_version: lastRun?.scanner_version || null,
-        last_run_received_at: lastRun?.received_at || null
+        last_run_received_at: lastRun?.received_at || null,
+        environment: device.environment
       };
     });
   }
@@ -903,6 +1072,7 @@ class MemoryD1 {
     last_run_received_at: string | null;
     last_complete_run_id: string | null;
     last_complete_received_at: string | null;
+    environment: "production" | "test";
   }> {
     const runs = this.runRows();
     return [...this.devices.entries()]
@@ -921,7 +1091,8 @@ class MemoryD1 {
           last_run_scanner_version: lastRun?.scanner_version || null,
           last_run_received_at: lastRun?.received_at || null,
           last_complete_run_id: lastComplete?.run_id || null,
-          last_complete_received_at: lastComplete?.received_at || null
+          last_complete_received_at: lastComplete?.received_at || null,
+          environment: device.environment
         };
       });
   }
@@ -1044,13 +1215,14 @@ function makeEnv(): Env & { RAW_BATCHES: MemoryR2; DB: MemoryD1; NORMALIZE_QUEUE
   };
 }
 
-async function addDevice(env: Env & { DB: MemoryD1 }, deviceID: string, hmacKey: string): Promise<void> {
+async function addDevice(env: Env & { DB: MemoryD1 }, deviceID: string, hmacKey: string, environment: "production" | "test" = "production"): Promise<void> {
   const encrypted = await testInternals.encryptSecret(env, hmacKey);
   env.DB.devices.set(deviceID, {
     hmac_key_ciphertext: encrypted.ciphertext,
     hmac_key_nonce: encrypted.nonce,
     created_at: new Date().toISOString(),
-    disabled_at: null
+    disabled_at: null,
+    environment
   });
 }
 
@@ -1155,8 +1327,8 @@ async function signedRequest(env: Env, body: Uint8Array, hmacKey: string, overri
   });
 }
 
-async function ingestSummary(env: Env & { DB: MemoryD1 }, deviceID: string, hmacKey: string, runID: string, profile = "baseline", status = "complete"): Promise<void> {
-  await addDevice(env, deviceID, hmacKey);
+async function ingestSummary(env: Env & { DB: MemoryD1 }, deviceID: string, hmacKey: string, runID: string, profile = "baseline", status = "complete", environment: "production" | "test" = "production"): Promise<void> {
+  await addDevice(env, deviceID, hmacKey, environment);
   const ndjson = [
     JSON.stringify({ record_type: "package", run_id: runID, endpoint: { device_id: deviceID } }),
     JSON.stringify({ record_type: "scan_summary", run_id: runID, profile, status, scanner_version: "v-test", endpoint: { device_id: deviceID } })
@@ -1295,9 +1467,206 @@ describe("bumblebee hive worker", () => {
 
     expect(response.status).toBe(201);
     expect(env.DB.devices.has("device-1")).toBe(true);
-    const body = await response.json() as { device_id: string; hmac_key: string };
+    const body = await response.json() as { device_id: string; hmac_key: string; environment: string };
     expect(body.device_id).toBe("device-1");
+    expect(body.environment).toBe("production");
     expect(body.hmac_key.length).toBeGreaterThan(20);
+  });
+
+  it("enrolls test devices explicitly and rejects invalid environments", async () => {
+    const env = makeEnv();
+    const testResponse = await worker.fetch(new Request("https://hive.example.test/v1/enroll", {
+      method: "POST",
+      headers: {
+        "CF-Access-Client-Id": "access-id",
+        "CF-Access-Client-Secret": "access-secret",
+        "X-Hive-Enroll-Token": "enroll-token"
+      },
+      body: JSON.stringify({ device_id: "device-test", environment: "test" })
+    }), env);
+    const invalidResponse = await worker.fetch(new Request("https://hive.example.test/v1/enroll", {
+      method: "POST",
+      headers: {
+        "CF-Access-Client-Id": "access-id",
+        "CF-Access-Client-Secret": "access-secret",
+        "X-Hive-Enroll-Token": "enroll-token"
+      },
+      body: JSON.stringify({ device_id: "device-invalid", environment: "dev" })
+    }), env);
+    const body = await testResponse.json() as { environment: string };
+
+    expect(testResponse.status).toBe(201);
+    expect(body.environment).toBe("test");
+    expect(env.DB.devices.get("device-test")?.environment).toBe("test");
+    expect(invalidResponse.status).toBe(400);
+    expect(await invalidResponse.json()).toEqual({ error: "invalid_device_environment" });
+  });
+
+  it("publishes a validated current catalog and serves it to active devices", async () => {
+    const env = makeEnv();
+    await addDevice(env, "device-1", "device-secret");
+    const catalog = JSON.stringify({
+      schema_version: "0.1.0",
+      entries: [{
+        id: "advisory-1",
+        name: "left-pad test advisory",
+        ecosystem: "npm",
+        package: "left-pad",
+        versions: ["1.3.0"],
+        severity: "critical"
+      }]
+    });
+
+    const publish = await worker.fetch(new Request("https://hive.example.test/v1/admin/catalog/current", {
+      method: "POST",
+      headers: { ...adminHeaders(env), "Content-Type": "application/json" },
+      body: JSON.stringify({ source: "unit-test", files: [{ path: "left-pad.json", content: catalog }] })
+    }), env);
+    const device = await worker.fetch(new Request("https://hive.example.test/v1/catalog/current", {
+      headers: {
+        "CF-Access-Client-Id": "access-id",
+        "CF-Access-Client-Secret": "access-secret",
+        "X-Inventory-Device-Id": "device-1"
+      }
+    }), env);
+    const body = await device.json() as {
+      manifest: {
+        source: string;
+        schema_version: string;
+        file_count: number;
+        entry_count: number;
+        files: Array<{ path: string; sha256: string; entry_count: number }>;
+      };
+      files: Array<{ path: string; sha256: string; content: string }>;
+    };
+
+    expect(publish.status).toBe(201);
+    expect(device.status).toBe(200);
+    expect(body.manifest).toMatchObject({
+      source: "unit-test",
+      schema_version: "0.1.0",
+      file_count: 1,
+      entry_count: 1
+    });
+    expect(body.manifest.files).toEqual([expect.objectContaining({ path: "left-pad.json", entry_count: 1 })]);
+    expect(body.files).toEqual([expect.objectContaining({ path: "left-pad.json", content: catalog })]);
+    expect(body.files[0].sha256).toBe(body.manifest.files[0].sha256);
+    expect(forbiddenVisibilityFields(body)).toEqual([]);
+  });
+
+  it("syncs the current catalog from an upstream Bumblebee threat_intel listing", async () => {
+    const env = makeEnv();
+    env.CATALOG_UPSTREAM_CONTENTS_URL = "https://api.example.test/repos/bumblebee/contents/threat_intel";
+    env.CATALOG_UPSTREAM_SOURCE = "test-upstream";
+    const catalog = JSON.stringify({
+      schema_version: "0.1.0",
+      entries: [{
+        id: "advisory-upstream",
+        name: "upstream test advisory",
+        ecosystem: "npm",
+        package: "left-pad",
+        versions: ["1.3.0"],
+        severity: "critical"
+      }]
+    });
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      if (url === env.CATALOG_UPSTREAM_CONTENTS_URL) {
+        return new Response(JSON.stringify([{
+          type: "file",
+          name: "upstream-advisory.json",
+          path: "threat_intel/upstream-advisory.json",
+          download_url: "https://raw.example.test/upstream-advisory.json"
+        }]), { headers: { "Content-Type": "application/json" } });
+      }
+      if (url === "https://raw.example.test/upstream-advisory.json") {
+        return new Response(catalog, { headers: { "Content-Type": "application/json" } });
+      }
+      return originalFetch(input);
+    }) as typeof fetch;
+
+    try {
+      const response = await worker.fetch(new Request("https://hive.example.test/v1/admin/catalog/sync-upstream", {
+        method: "POST",
+        headers: adminHeaders(env)
+      }), env);
+      const body = await response.json() as {
+        catalog: { source: string; entry_count: number; files: Array<{ path: string }> };
+      };
+
+      expect(response.status).toBe(201);
+      expect(body.catalog).toMatchObject({ source: "test-upstream", entry_count: 1 });
+      expect(body.catalog.files).toEqual([expect.objectContaining({ path: "upstream-advisory.json" })]);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("runs scheduled upstream catalog sync only when enabled", async () => {
+    const env = makeEnv();
+    env.CATALOG_UPSTREAM_SYNC_ENABLED = "true";
+    env.CATALOG_UPSTREAM_CONTENTS_URL = "https://api.example.test/repos/bumblebee/contents/threat_intel";
+    const catalog = JSON.stringify({
+      schema_version: "0.1.0",
+      entries: [{ id: "advisory-scheduled", ecosystem: "npm", package: "left-pad", versions: ["1.3.0"] }]
+    });
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      if (url === env.CATALOG_UPSTREAM_CONTENTS_URL) {
+        return new Response(JSON.stringify([{
+          type: "file",
+          name: "scheduled-advisory.json",
+          path: "threat_intel/scheduled-advisory.json",
+          download_url: "https://raw.example.test/scheduled-advisory.json"
+        }]), { headers: { "Content-Type": "application/json" } });
+      }
+      if (url === "https://raw.example.test/scheduled-advisory.json") {
+        return new Response(catalog, { headers: { "Content-Type": "application/json" } });
+      }
+      return originalFetch(input);
+    }) as typeof fetch;
+
+    try {
+      const waits: Promise<unknown>[] = [];
+      await worker.scheduled({} as ScheduledController, env, {
+        waitUntil(promise: Promise<unknown>) {
+          waits.push(promise);
+        },
+        passThroughOnException() {}
+      } as ExecutionContext);
+      await Promise.all(waits);
+
+      expect(env.DB.catalogReleaseRows()).toHaveLength(1);
+      expect(env.DB.catalogFileRows()).toEqual([expect.objectContaining({ path: "scheduled-advisory.json" })]);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("rejects invalid catalog publish requests and inactive device catalog reads", async () => {
+    const env = makeEnv();
+    await addDevice(env, "device-1", "device-secret");
+    env.DB.devices.get("device-1")!.disabled_at = "2026-05-27T00:00:00.000Z";
+
+    const invalid = await worker.fetch(new Request("https://hive.example.test/v1/admin/catalog/current", {
+      method: "POST",
+      headers: { ...adminHeaders(env), "Content-Type": "application/json" },
+      body: JSON.stringify({ files: [{ path: "../bad.json", content: "{}" }] })
+    }), env);
+    const disabled = await worker.fetch(new Request("https://hive.example.test/v1/catalog/current", {
+      headers: {
+        "CF-Access-Client-Id": "access-id",
+        "CF-Access-Client-Secret": "access-secret",
+        "X-Inventory-Device-Id": "device-1"
+      }
+    }), env);
+
+    expect(invalid.status).toBe(400);
+    expect(await invalid.json()).toEqual({ error: "invalid_catalog_path" });
+    expect(disabled.status).toBe(401);
+    expect(await disabled.json()).toEqual({ error: "unknown_device" });
   });
 
   it("accepts a valid gzip HMAC batch and records raw plus run index", async () => {
@@ -2227,6 +2596,56 @@ describe("bumblebee hive worker", () => {
     expect(forbiddenVisibilityFields(body)).toEqual([]);
   });
 
+  it("defaults admin visibility to production and allows explicit test or all environments", async () => {
+    const env = makeEnv();
+    await addDevice(env, "device-prod", "prod-secret", "production");
+    await addDevice(env, "device-test", "test-secret", "test");
+    for (const [deviceID, secret, runID] of [
+      ["device-prod", "prod-secret", "run-prod"],
+      ["device-test", "test-secret", "run-test"]
+    ] as const) {
+      const ndjson = [
+        JSON.stringify(packageRecord(runID, deviceID)),
+        JSON.stringify(findingRecord(runID, deviceID)),
+        JSON.stringify(summaryRecord(runID, deviceID))
+      ].join("\n") + "\n";
+      const response = await worker.fetch(await signedRequest(env, gzipSync(ndjson), secret, {
+        "X-Inventory-Device-Id": deviceID
+      }), env);
+      expect(response.status).toBe(200);
+    }
+    for (const message of env.NORMALIZE_QUEUE.messages) {
+      await testInternals.normalizeQueuedBatch(env, message as { device_id: string; run_id: string; batch_id: string });
+    }
+
+    const defaultDevices = await worker.fetch(new Request("https://hive.example.test/v1/admin/devices?status=all", { headers: adminHeaders(env) }), env);
+    const testDevices = await worker.fetch(new Request("https://hive.example.test/v1/admin/devices?status=all&environment=test", { headers: adminHeaders(env) }), env);
+    const allDevices = await worker.fetch(new Request("https://hive.example.test/v1/admin/devices?status=all&environment=all", { headers: adminHeaders(env) }), env);
+    const defaultRuns = await worker.fetch(new Request("https://hive.example.test/v1/admin/runs", { headers: adminHeaders(env) }), env);
+    const testFindings = await worker.fetch(new Request("https://hive.example.test/v1/admin/findings?environment=test", { headers: adminHeaders(env) }), env);
+    const allFindings = await worker.fetch(new Request("https://hive.example.test/v1/admin/findings?environment=all", { headers: adminHeaders(env) }), env);
+    const testPackages = await worker.fetch(new Request("https://hive.example.test/v1/admin/packages?environment=test", { headers: adminHeaders(env) }), env);
+    const invalid = await worker.fetch(new Request("https://hive.example.test/v1/admin/devices?environment=dev", { headers: adminHeaders(env) }), env);
+    const defaultDevicesBody = await defaultDevices.json() as { total: number; devices: Array<{ device_id: string; environment: string }> };
+    const testDevicesBody = await testDevices.json() as { total: number; devices: Array<{ device_id: string; environment: string }> };
+    const allDevicesBody = await allDevices.json() as { total: number };
+    const defaultRunsBody = await defaultRuns.json() as { total: number; runs: Array<{ device_id: string }> };
+    const testFindingsBody = await testFindings.json() as { counts: { total: number }; findings: Array<{ device_id: string }> };
+    const allFindingsBody = await allFindings.json() as { counts: { total: number } };
+    const testPackagesBody = await testPackages.json() as { total: number; packages: Array<{ device_id: string }> };
+
+    expect(defaultDevicesBody).toMatchObject({ total: 1, devices: [expect.objectContaining({ device_id: "device-prod", environment: "production" })] });
+    expect(testDevicesBody).toMatchObject({ total: 1, devices: [expect.objectContaining({ device_id: "device-test", environment: "test" })] });
+    expect(allDevicesBody.total).toBe(2);
+    expect(defaultRunsBody).toMatchObject({ total: 1, runs: [expect.objectContaining({ device_id: "device-prod" })] });
+    expect(testFindingsBody.counts.total).toBe(1);
+    expect(testFindingsBody.findings).toEqual([expect.objectContaining({ device_id: "device-test" })]);
+    expect(allFindingsBody.counts.total).toBe(2);
+    expect(testPackagesBody).toMatchObject({ total: 1, packages: [expect.objectContaining({ device_id: "device-test" })] });
+    expect(invalid.status).toBe(400);
+    expect(await invalid.json()).toEqual({ error: "invalid_environment_filter" });
+  });
+
   it("allows UI read metadata without an email claim but rejects UI writes without an actor email", async () => {
     const env = makeEnv();
     env.UI_ADMIN_ACTION_DOMAINS = "example.test";
@@ -2446,6 +2865,107 @@ describe("bumblebee hive worker", () => {
     expect(env.DB.batchRows().map((batch) => batch.run_id)).toEqual(["run-new"]);
     expect(env.DB.runRows().map((run) => run.run_id)).toEqual(["run-new"]);
     expect(forbiddenVisibilityFields(cleanupBody)).toEqual([]);
+  });
+
+  it("dry-runs and confirms guarded device purge without exposing raw object keys", async () => {
+    const env = makeEnv();
+    await addDevice(env, "device-purge", "purge-secret", "test");
+    const ndjson = [
+      JSON.stringify(packageRecord("run-purge", "device-purge")),
+      JSON.stringify(findingRecord("run-purge", "device-purge")),
+      JSON.stringify(summaryRecord("run-purge", "device-purge"))
+    ].join("\n") + "\n";
+    const ingestResponse = await worker.fetch(await signedRequest(env, gzipSync(ndjson), "purge-secret", {
+      "X-Inventory-Device-Id": "device-purge"
+    }), env);
+    expect(ingestResponse.status).toBe(200);
+    await testInternals.normalizeQueuedBatch(env, env.NORMALIZE_QUEUE.messages[0] as { device_id: string; run_id: string; batch_id: string });
+    const disableResponse = await worker.fetch(new Request("https://hive.example.test/v1/admin/devices/device-purge/disable", {
+      method: "POST",
+      headers: { ...adminHeaders(env), "Content-Type": "application/json" },
+      body: JSON.stringify({ reason: "purge test setup" })
+    }), env);
+    expect(disableResponse.status).toBe(200);
+    const objectKey = env.DB.batchRows().find((batch) => batch.device_id === "device-purge")?.object_key;
+    expect(objectKey).toBeTruthy();
+    expect(env.RAW_BATCHES.objects.has(objectKey!)).toBe(true);
+
+    const dryRunResponse = await worker.fetch(new Request("https://hive.example.test/v1/admin/devices/device-purge/purge?dry_run=true", {
+      method: "POST",
+      headers: adminHeaders(env)
+    }), env);
+    const dryRunBody = await dryRunResponse.json() as {
+      dry_run: boolean;
+      device: { environment: string; status: string };
+      candidates: { raw_objects: number; batches: number; runs: number; normalization_jobs: number; inventory_records: number; inventory_current: number; exposure_findings: number; lifecycle_events: number; devices: number };
+    };
+    const mismatchResponse = await worker.fetch(new Request("https://hive.example.test/v1/admin/devices/device-purge/purge?dry_run=false", {
+      method: "POST",
+      headers: { ...adminHeaders(env), "Content-Type": "application/json" },
+      body: JSON.stringify({ reason: "remove test device", confirm_device_id: "wrong-device" })
+    }), env);
+    const purgeResponse = await worker.fetch(new Request("https://hive.example.test/v1/admin/devices/device-purge/purge?dry_run=false", {
+      method: "POST",
+      headers: { ...adminHeaders(env), "Content-Type": "application/json" },
+      body: JSON.stringify({ reason: "remove test device", confirm_device_id: "device-purge" })
+    }), env);
+    const purgeBody = await purgeResponse.json() as {
+      deleted: { batches: number; runs: number; normalization_jobs: number; inventory_records: number; inventory_current: number; exposure_findings: number; lifecycle_events: number; devices: number };
+      raw_objects: { deleted: number; delete_errors: number };
+    };
+
+    expect(dryRunResponse.status).toBe(200);
+    expect(dryRunBody).toMatchObject({
+      dry_run: true,
+      device: { environment: "test", status: "disabled" },
+      candidates: {
+        raw_objects: 1,
+        batches: 1,
+        runs: 1,
+        normalization_jobs: 1,
+        inventory_records: 2,
+        inventory_current: 1,
+        exposure_findings: 1,
+        lifecycle_events: 1,
+        devices: 1
+      }
+    });
+    expect(forbiddenVisibilityFields(dryRunBody)).toEqual([]);
+    expect(mismatchResponse.status).toBe(400);
+    expect(await mismatchResponse.json()).toEqual({ error: "confirm_device_id_mismatch" });
+    expect(purgeResponse.status).toBe(200);
+    expect(purgeBody.raw_objects).toEqual({ candidates: 1, deleted: 1, delete_errors: 0 });
+    expect(purgeBody.deleted).toMatchObject({
+      batches: 1,
+      runs: 1,
+      normalization_jobs: 1,
+      inventory_records: 2,
+      inventory_current: 1,
+      exposure_findings: 1,
+      lifecycle_events: 1,
+      devices: 1
+    });
+    expect(forbiddenVisibilityFields(purgeBody)).toEqual([]);
+    expect(env.RAW_BATCHES.objects.has(objectKey!)).toBe(false);
+    expect(env.DB.devices.has("device-purge")).toBe(false);
+    expect(env.DB.batchRows().filter((batch) => batch.device_id === "device-purge")).toEqual([]);
+    expect(env.DB.runRows().filter((run) => run.device_id === "device-purge")).toEqual([]);
+    expect(env.DB.findingRows().filter((finding) => finding.device_id === "device-purge")).toEqual([]);
+  });
+
+  it("requires production devices to be disabled before confirmed purge", async () => {
+    const env = makeEnv();
+    await addDevice(env, "device-prod", "prod-secret", "production");
+
+    const response = await worker.fetch(new Request("https://hive.example.test/v1/admin/devices/device-prod/purge?dry_run=false", {
+      method: "POST",
+      headers: { ...adminHeaders(env), "Content-Type": "application/json" },
+      body: JSON.stringify({ reason: "remove stale production device", confirm_device_id: "device-prod" })
+    }), env);
+
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({ error: "production_device_must_be_disabled" });
+    expect(env.DB.devices.has("device-prod")).toBe(true);
   });
 
   it("rejects retention cleanup without the admin token", async () => {
