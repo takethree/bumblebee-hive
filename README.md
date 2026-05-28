@@ -73,10 +73,10 @@ developer pilot, use
 
 Hive supports two Bumblebee paths:
 
-| Mode | Use when | Ingest path | What you get |
-|---|---|---|---|
-| Managed branch | You use a Bumblebee build with `bumblebee hive join`, `hive catalog sync`, and `hive run`. | `/v1/ingest` | Cloudflare Access service-token ingest, Hive-managed catalog sync/cache, and the Windows compatibility-layer scanner when using the Windows branch. |
-| Upstream HTTP | You use stock upstream Bumblebee with its generic HTTP sink. | `/v1/compat/ingest/<device-id>` | HMAC/gzip ingest into Hive, raw batch storage, normalization, admin UI, and findings from records the upstream scanner submits. |
+| Mode | Bumblebee source | Use when | Ingest path | What you get |
+|---|---|---|---|---|
+| Managed branch | [bradmb/bumblebee](https://github.com/bradmb/bumblebee) | You use a Bumblebee build with `bumblebee hive join`, `hive catalog sync`, and `hive run`. | `/v1/ingest` | Cloudflare Access service-token ingest, Hive-managed catalog sync/cache, and the Windows compatibility-layer scanner when using the Windows branch. |
+| Upstream HTTP | [perplexityai/bumblebee](https://github.com/perplexityai/bumblebee) | You use stock upstream Bumblebee with its generic HTTP sink. | `/v1/compat/ingest/<device-id>` | HMAC/gzip ingest into Hive, raw batch storage, normalization, admin UI, and findings from records the upstream scanner submits. |
 
 The upstream HTTP path intentionally does not require Cloudflare Access
 service-token headers on the ingest request because upstream Bumblebee cannot
