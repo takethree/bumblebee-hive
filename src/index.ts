@@ -400,6 +400,11 @@ interface ValidatedRecords {
   summary: InventoryRecord | null;
 }
 
+interface IngestOptions {
+  requireAccess: boolean;
+  deviceID?: string;
+}
+
 const signatureHeader = "X-Inventory-Signature";
 const timestampHeader = "X-Inventory-Timestamp";
 const deviceHeader = "X-Inventory-Device-Id";
@@ -484,7 +489,14 @@ export default {
         return await enroll(request, env);
       }
       if (request.method === "POST" && url.pathname === "/v1/ingest") {
-        return await ingest(request, env);
+        return await ingest(request, env, { requireAccess: true });
+      }
+      const compatIngestMatch = url.pathname.match(/^\/v1\/compat\/ingest\/([^/]+)$/);
+      if (request.method === "POST" && compatIngestMatch) {
+        return await ingest(request, env, {
+          requireAccess: false,
+          deviceID: decodePathSegment(compatIngestMatch[1])
+        });
       }
       if (request.method === "GET" && url.pathname === "/v1/catalog/current") {
         return await deviceCurrentCatalog(request, env);
@@ -645,15 +657,18 @@ async function enroll(request: Request, env: Env): Promise<Response> {
     environment: deviceEnvironment,
     hmac_key: hmacKey,
     ingest_path: "/v1/ingest",
+    upstream_ingest_path: `/v1/compat/ingest/${encodeURIComponent(deviceID)}`,
     required_headers: [accessClientIDHeader, accessClientSecretHeader, deviceHeader]
   }, 201);
 }
 
-async function ingest(request: Request, env: Env): Promise<Response> {
-  requireAccess(request, env);
+async function ingest(request: Request, env: Env, options: IngestOptions): Promise<Response> {
+  if (options.requireAccess) {
+    requireAccess(request, env);
+  }
   requireContentType(request);
 
-  const deviceID = sanitizeDeviceID(request.headers.get(deviceHeader) || "");
+  const deviceID = sanitizeDeviceID(options.deviceID || request.headers.get(deviceHeader) || "");
   if (!deviceID) {
     throw new HttpError(400, "missing_device_id");
   }
@@ -3210,6 +3225,14 @@ function sanitizeDeviceID(value: string): string {
     return "";
   }
   return trimmed;
+}
+
+function decodePathSegment(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return "";
+  }
 }
 
 function sanitizeOpaqueID(value: string): string {

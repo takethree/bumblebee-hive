@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { gzipSync } from "node:zlib";
 import { exportJWK, generateKeyPair, SignJWT } from "jose";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -1327,6 +1328,26 @@ async function signedRequest(env: Env, body: Uint8Array, hmacKey: string, overri
   });
 }
 
+async function upstreamSignedRequest(body: Uint8Array, hmacKey: string, deviceID: string, overrides: HeadersInit = {}, pathDeviceID = deviceID): Promise<Request> {
+  const timestamp = Math.floor(Date.now() / 1000).toString();
+  const prefix = new TextEncoder().encode(`${timestamp}.`);
+  const payload = new Uint8Array(prefix.byteLength + body.byteLength);
+  payload.set(prefix);
+  payload.set(body, prefix.byteLength);
+  const signature = await testInternals.hmacSha256Hex(hmacKey, payload);
+  return new Request(`https://hive.example.test/v1/compat/ingest/${encodeURIComponent(pathDeviceID)}`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/x-ndjson",
+      "Content-Encoding": "gzip",
+      "X-Inventory-Timestamp": timestamp,
+      "X-Inventory-Signature": `sha256=${signature}`,
+      ...overrides
+    },
+    body: body.buffer.slice(body.byteOffset, body.byteOffset + body.byteLength) as ArrayBuffer
+  });
+}
+
 async function ingestSummary(env: Env & { DB: MemoryD1 }, deviceID: string, hmacKey: string, runID: string, profile = "baseline", status = "complete", environment: "production" | "test" = "production"): Promise<void> {
   await addDevice(env, deviceID, hmacKey, environment);
   const ndjson = [
@@ -1429,6 +1450,19 @@ function setRunReceivedAt(env: Env & { DB: MemoryD1 }, runID: string, receivedAt
 }
 
 describe("bumblebee hive worker", () => {
+  it("documents managed and upstream installer wrapper modes in the installer script", () => {
+    const script = readFileSync(new URL("../scripts/install-bumblebee.ps1", import.meta.url), "utf8");
+
+    expect(script).toContain('[ValidateSet("ManagedHive", "UpstreamHttp")]');
+    expect(script).toContain("Write-ManagedRunScript");
+    expect(script).toContain("Write-UpstreamRunScript");
+    expect(script).toContain("/v1/compat/ingest/$DeviceId");
+    expect(script).toContain("--http-auth");
+    expect(script).toContain("hmac-sha256");
+    expect(script).toContain("BUMBLEBEE_HIVE_HMAC_KEY");
+    expect(script).toContain("BUMBLEBEE_HIVE_DEVICE_ID");
+  });
+
   afterEach(() => {
     vi.useRealTimers();
   });
@@ -1467,10 +1501,11 @@ describe("bumblebee hive worker", () => {
 
     expect(response.status).toBe(201);
     expect(env.DB.devices.has("device-1")).toBe(true);
-    const body = await response.json() as { device_id: string; hmac_key: string; environment: string };
+    const body = await response.json() as { device_id: string; hmac_key: string; environment: string; upstream_ingest_path: string };
     expect(body.device_id).toBe("device-1");
     expect(body.environment).toBe("production");
     expect(body.hmac_key.length).toBeGreaterThan(20);
+    expect(body.upstream_ingest_path).toBe("/v1/compat/ingest/device-1");
   });
 
   it("enrolls test devices explicitly and rejects invalid environments", async () => {
@@ -1686,6 +1721,59 @@ describe("bumblebee hive worker", () => {
     expect(env.DB.batches).toHaveLength(1);
     expect(env.DB.runs).toHaveLength(1);
     expect(env.NORMALIZE_QUEUE.messages).toHaveLength(1);
+  });
+
+  it("accepts upstream-compatible HMAC ingest without Access headers", async () => {
+    const env = makeEnv();
+    const hmacKey = "device-secret";
+    await addDevice(env, "device:1", hmacKey);
+    const ndjson = [
+      JSON.stringify({ record_type: "package", run_id: "run-1", endpoint: { device_id: "device:1" } }),
+      JSON.stringify({ record_type: "scan_summary", run_id: "run-1", profile: "baseline", status: "complete", scanner_version: "v-test", endpoint: { device_id: "device:1" } })
+    ].join("\n") + "\n";
+    const request = await upstreamSignedRequest(gzipSync(ndjson), hmacKey, "device:1");
+
+    const response = await worker.fetch(request, env);
+
+    expect(response.status).toBe(200);
+    expect(env.RAW_BATCHES.objects.size).toBe(1);
+    expect(env.DB.batches).toHaveLength(1);
+    expect(env.DB.runs).toHaveLength(1);
+    expect(env.NORMALIZE_QUEUE.messages).toEqual([expect.objectContaining({
+      device_id: "device:1",
+      run_id: "run-1"
+    })]);
+  });
+
+  it("rejects invalid upstream-compatible HMAC ingest requests", async () => {
+    const env = makeEnv();
+    const hmacKey = "device-secret";
+    await addDevice(env, "device-1", hmacKey);
+    await addDevice(env, "disabled-device", hmacKey);
+    env.DB.devices.get("disabled-device")!.disabled_at = "2026-05-27T00:00:00.000Z";
+    const ndjson = JSON.stringify({ record_type: "scan_summary", run_id: "run-1", status: "complete", endpoint: { device_id: "device-1" } }) + "\n";
+
+    const missingSignature = await worker.fetch(await upstreamSignedRequest(gzipSync(ndjson), hmacKey, "device-1", {
+      "X-Inventory-Signature": ""
+    }), env);
+    const badTimestamp = await worker.fetch(await upstreamSignedRequest(gzipSync(ndjson), hmacKey, "device-1", {
+      "X-Inventory-Timestamp": "1"
+    }), env);
+    const unknownDevice = await worker.fetch(await upstreamSignedRequest(gzipSync(ndjson), hmacKey, "unknown-device"), env);
+    const disabledDevice = await worker.fetch(await upstreamSignedRequest(gzipSync(ndjson), hmacKey, "disabled-device"), env);
+    const mismatchedBody = JSON.stringify({ record_type: "scan_summary", run_id: "run-1", status: "complete", endpoint: { device_id: "other-device" } }) + "\n";
+    const mismatch = await worker.fetch(await upstreamSignedRequest(gzipSync(mismatchedBody), hmacKey, "device-1"), env);
+
+    expect(missingSignature.status).toBe(401);
+    expect(await missingSignature.json()).toEqual({ error: "missing_signature" });
+    expect(badTimestamp.status).toBe(401);
+    expect(await badTimestamp.json()).toEqual({ error: "invalid_timestamp" });
+    expect(unknownDevice.status).toBe(401);
+    expect(await unknownDevice.json()).toEqual({ error: "unknown_device" });
+    expect(disabledDevice.status).toBe(401);
+    expect(await disabledDevice.json()).toEqual({ error: "unknown_device" });
+    expect(mismatch.status).toBe(400);
+    expect(await mismatch.json()).toEqual({ error: "device_id_mismatch" });
   });
 
   it("normalizes complete package batches into current inventory idempotently", async () => {

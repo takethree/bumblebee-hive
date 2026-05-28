@@ -13,6 +13,10 @@ developer machines using the current Windows per-user pilot shape:
 - scan profile: `baseline`
 - release version: `v0.1.2`
 
+The default path uses the managed Bumblebee branch. Use the upstream HTTP path
+only when the endpoint binary is stock upstream Bumblebee and does not include
+the `bumblebee hive` command group.
+
 Do not put real Access secrets, enrollment tokens, admin tokens, device IDs,
 hostnames, usernames, SIDs, profile paths, or raw inventory into tickets,
 commit messages, docs, or receipts.
@@ -25,6 +29,7 @@ Prepare these values outside the repo:
 | --- | --- |
 | `HIVE_BASE_URL` | Public Hive origin protected by Cloudflare Access, for example `https://hive.example.com`. |
 | `RELEASE_BASE_URL` | Operator-owned Bumblebee GitHub release download base, for example `https://github.com/<owner>/bumblebee/releases/download`. |
+| `BUMBLEBEE_MODE` | `ManagedHive` for the managed branch, or `UpstreamHttp` for stock upstream Bumblebee. |
 | `ACCESS_CLIENT_ID` | Cloudflare Access service-token client ID. |
 | `ACCESS_CLIENT_SECRET` | Cloudflare Access service-token client secret. |
 | `ENROLLMENT_TOKEN` | Hive enrollment token for this pilot or rollout wave. |
@@ -52,6 +57,12 @@ Confirm the Cloudflare Access application has a machine policy with action
 `Service Auth` for the service token used by this runbook. A normal `Allow`
 policy can return browser sign-in HTML to the installer instead of Hive JSON.
 
+For `ManagedHive`, the protected application should include `/v1/ingest`.
+For `UpstreamHttp`, stock upstream Bumblebee cannot send Cloudflare Access
+service-token headers, so `/v1/compat/ingest/<device-id>` must be reachable
+without Access service-token enforcement. That compatibility route is still
+protected by the per-device HMAC signature.
+
 ## Dry Run
 
 From the Hive repo, dry-run the installer with placeholders first:
@@ -61,6 +72,7 @@ powershell -NoProfile -ExecutionPolicy Bypass `
   -File .\scripts\install-bumblebee.ps1 `
   -HiveBaseUrl $env:HIVE_BASE_URL `
   -ReleaseBaseUrl $env:RELEASE_BASE_URL `
+  -BumblebeeMode ManagedHive `
   -AccessClientId $env:ACCESS_CLIENT_ID `
   -AccessClientSecret $env:ACCESS_CLIENT_SECRET `
   -EnrollmentToken $env:ENROLLMENT_TOKEN `
@@ -83,6 +95,7 @@ powershell -NoProfile -ExecutionPolicy Bypass `
   -File .\scripts\install-bumblebee.ps1 `
   -HiveBaseUrl $env:HIVE_BASE_URL `
   -ReleaseBaseUrl $env:RELEASE_BASE_URL `
+  -BumblebeeMode ManagedHive `
   -AccessClientId $env:ACCESS_CLIENT_ID `
   -AccessClientSecret $env:ACCESS_CLIENT_SECRET `
   -EnrollmentToken $env:ENROLLMENT_TOKEN `
@@ -98,6 +111,38 @@ writes local Hive `config.json` and `secrets.json`, writes the `bumblebee hive
 run` wrapper, and registers the current-user scheduled task. Rerunning the
 installer reuses the existing local Hive identity unless the local config is
 removed first.
+
+## Install With Stock Upstream Bumblebee
+
+Use this mode when the binary has upstream Bumblebee's generic HTTP sink but no
+`bumblebee hive` command group. The installer performs Hive enrollment itself
+and writes a wrapper that runs stock `bumblebee scan --output http` with
+HMAC/gzip transport.
+
+If the upstream source does not publish Windows GoReleaser zip assets, provide
+a trusted local `bumblebee.exe`:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass `
+  -File .\scripts\install-bumblebee.ps1 `
+  -HiveBaseUrl $env:HIVE_BASE_URL `
+  -BumblebeeMode UpstreamHttp `
+  -AccessClientId $env:ACCESS_CLIENT_ID `
+  -AccessClientSecret $env:ACCESS_CLIENT_SECRET `
+  -EnrollmentToken $env:ENROLLMENT_TOKEN `
+  -InstallRoot "$env:LOCALAPPDATA\Programs\Bumblebee" `
+  -ConfigRoot "$env:APPDATA\Bumblebee" `
+  -CacheRoot "$env:LOCALAPPDATA\Bumblebee\catalog-cache" `
+  -TaskName "Bumblebee Baseline Pilot" `
+  -SkipDownload `
+  -BumblebeeExePath .\bumblebee.exe
+```
+
+The upstream wrapper posts to `/v1/compat/ingest/<device-id>` and does not send
+Cloudflare Access service-token headers. It still signs every batch with the
+device HMAC key, sets `endpoint.device_id` through `--device-id-env`, and uses
+gzip before HMAC verification. Hive-managed catalog sync/cache and the Windows
+compatibility-layer scanner require the managed branch.
 
 ## Verify Without Sending Inventory
 
@@ -115,8 +160,9 @@ powershell -NoProfile -ExecutionPolicy Bypass `
 ```
 
 `CheckOnly` validates local Hive config, local Hive secret material, wrapper
-script, expected binary, cache root, device ID presence, `/v1/ingest` target
-shape, device environment, scan profile, `bumblebee.exe selftest`,
+script, expected binary, cache root, device ID presence, the expected ingest
+target shape for `ManagedHive` or `UpstreamHttp`, device environment, scan
+profile, `bumblebee.exe selftest`,
 scheduled-task presence, last task result, Hive admin metadata reachability for
 the configured environment, dashboard asset availability, normalization-job
 visibility, device-detail recent normalization visibility, and optional

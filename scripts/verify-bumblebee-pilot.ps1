@@ -103,6 +103,19 @@ function Get-HiveEnvironment {
   $environment
 }
 
+function Get-BumblebeeMode {
+  param([object]$Config)
+  $mode = [string](Get-JsonProperty -Object $Config -Name "transport_mode")
+  if ($mode -eq "UpstreamHttp" -or $mode -eq "ManagedHive") {
+    return $mode
+  }
+  $ingestPath = [string](Get-JsonProperty -Object $Config -Name "ingest_path")
+  if ($ingestPath -like "/v1/compat/ingest/*") {
+    return "UpstreamHttp"
+  }
+  "ManagedHive"
+}
+
 function Add-EnvironmentQuery {
   param([string]$Path, [object]$Config)
   $environment = [uri]::EscapeDataString((Get-HiveEnvironment -Config $Config))
@@ -417,6 +430,12 @@ try {
   $hiveBaseUrl = Get-HiveBaseUrl -Config $config
   $configuredIngestPath = [string](Get-JsonProperty -Object $config -Name "ingest_path")
   $configuredEnvironment = Get-HiveEnvironment -Config $config
+  $configuredBumblebeeMode = Get-BumblebeeMode -Config $config
+  $expectedIngestPath = if ($configuredBumblebeeMode -eq "UpstreamHttp") {
+    "/v1/compat/ingest/" + [string]$config.device_id
+  } else {
+    "/v1/ingest"
+  }
   $localSecrets = $null
   if (Test-Path -LiteralPath $localSecretsPath -PathType Leaf) {
     $localSecrets = Get-Content -LiteralPath $localSecretsPath -Raw | ConvertFrom-Json
@@ -426,16 +445,23 @@ try {
   $checks.Add((New-Check -Name "local_hive_secrets_present" -Passed (Test-Path -LiteralPath $localSecretsPath -PathType Leaf)))
   $checks.Add((New-Check -Name "legacy_dpapi_secrets_absent" -Passed (-not (Test-Path -LiteralPath $legacySecretsPath -PathType Leaf))))
   $checks.Add((New-Check -Name "run_script_present" -Passed (Test-Path -LiteralPath $runScript -PathType Leaf)))
-  $checks.Add((New-Check -Name "run_script_uses_hive_run" -Passed ($runScriptText -match '"hive"\s*,\s*"run"' -and $runScriptText -match "--config-dir" -and $runScriptText -match "--cache-dir")))
+  if ($configuredBumblebeeMode -eq "UpstreamHttp") {
+    $checks.Add((New-Check -Name "run_script_uses_upstream_http" -Passed ($runScriptText -match "'scan'" -and $runScriptText -match "--output" -and $runScriptText -match "--http-auth" -and $runScriptText -match "hmac-sha256" -and $runScriptText -match "BUMBLEBEE_HIVE_HMAC_KEY" -and $runScriptText -match "BUMBLEBEE_HIVE_DEVICE_ID")))
+    $checks.Add((New-Check -Name "run_script_avoids_custom_hive_commands" -Passed (-not ($runScriptText -match '"hive"\s*,\s*"run"'))))
+  } else {
+    $checks.Add((New-Check -Name "run_script_uses_hive_run" -Passed ($runScriptText -match '"hive"\s*,\s*"run"' -and $runScriptText -match "--config-dir" -and $runScriptText -match "--cache-dir")))
+  }
   $checks.Add((New-Check -Name "expected_binary_present" -Passed (Test-Path -LiteralPath $expectedExe -PathType Leaf)))
   $checks.Add((New-Check -Name "cache_root_present" -Passed (Test-Path -LiteralPath $CacheRoot -PathType Container)))
   $checks.Add((New-Check -Name "configured_base_url_present" -Passed (-not [string]::IsNullOrWhiteSpace($hiveBaseUrl))))
   $checks.Add((New-Check -Name "configured_device_id_present" -Passed (-not [string]::IsNullOrWhiteSpace([string]$config.device_id))))
-  $checks.Add((New-Check -Name "configured_ingest_path" -Passed ($configuredIngestPath -eq "/v1/ingest") -Detail @{ path = $configuredIngestPath }))
+  $checks.Add((New-Check -Name "configured_ingest_path" -Passed ($configuredIngestPath -eq $expectedIngestPath) -Detail @{ path = $configuredIngestPath; expected = $expectedIngestPath; bumblebee_mode = $configuredBumblebeeMode }))
   $checks.Add((New-Check -Name "configured_environment" -Passed (@("production", "test") -contains $configuredEnvironment) -Detail @{ environment = $configuredEnvironment }))
   $checks.Add((New-Check -Name "configured_scan_profile" -Passed (-not [string]::IsNullOrWhiteSpace([string]$config.scan_profile)) -Detail @{ profile = [string]$config.scan_profile }))
-  $checks.Add((New-Check -Name "local_access_client_id_present" -Passed (Test-JsonSecretPresent -Secrets $localSecrets -Name "access_client_id")))
-  $checks.Add((New-Check -Name "local_access_client_secret_present" -Passed (Test-JsonSecretPresent -Secrets $localSecrets -Name "access_client_secret")))
+  if ($configuredBumblebeeMode -eq "ManagedHive") {
+    $checks.Add((New-Check -Name "local_access_client_id_present" -Passed (Test-JsonSecretPresent -Secrets $localSecrets -Name "access_client_id")))
+    $checks.Add((New-Check -Name "local_access_client_secret_present" -Passed (Test-JsonSecretPresent -Secrets $localSecrets -Name "access_client_secret")))
+  }
   $checks.Add((New-Check -Name "local_hmac_key_present" -Passed (Test-JsonSecretPresent -Secrets $localSecrets -Name "hmac_key")))
 
   foreach ($check in $checks) {
@@ -645,6 +671,7 @@ try {
   $output = [ordered]@{
     ok = $ok
     mode = $Mode
+    bumblebee_mode = $configuredBumblebeeMode
     checks = @($checks)
     admin_endpoints = @($adminResponses)
     admin_assets = $adminAssets

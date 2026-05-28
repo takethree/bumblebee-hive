@@ -25,7 +25,7 @@ machines do not need object-storage, database, or admin credentials.
 - Queue-backed normalization from raw batches into queryable metadata tables.
 - Metadata-only admin UI at `/admin/`.
 - Windows bootstrapper scripts for per-user Bumblebee enrollment and scheduled
-  `bumblebee hive run`.
+  managed or upstream-compatible Bumblebee runs.
 
 Hive is not a SIEM, EDR, identity-management system, raw forensic browser, or
 general device-management platform. Break-glass access to raw R2/D1 data should
@@ -36,7 +36,8 @@ stay outside the normal operator UI.
 | Part | Purpose |
 |---|---|
 | `/v1/enroll` | Enroll a Bumblebee device and issue its encrypted HMAC key. |
-| `/v1/ingest` | Accept signed Bumblebee transport batches. |
+| `/v1/ingest` | Accept signed managed Bumblebee transport batches behind Cloudflare Access. |
+| `/v1/compat/ingest/<device-id>` | Accept stock upstream Bumblebee HTTP/HMAC batches without custom headers. |
 | `RAW_BATCHES` R2 bucket | Store accepted raw request bodies. |
 | `DB` D1 database | Store device, run, batch, current inventory, finding, catalog, lifecycle, and admin metadata. |
 | `NORMALIZE_QUEUE` | Normalize accepted batches asynchronously. |
@@ -67,6 +68,43 @@ Production deployment requires real Cloudflare resource IDs and secrets in
 `wrangler.toml` and Wrangler secrets. For a sequenced per-user Windows
 developer pilot, use
 [docs/developer-rollout-runbook.md](docs/developer-rollout-runbook.md).
+
+## Use With Bumblebee
+
+Hive supports two Bumblebee paths:
+
+| Mode | Use when | Ingest path | What you get |
+|---|---|---|---|
+| Managed branch | You use a Bumblebee build with `bumblebee hive join`, `hive catalog sync`, and `hive run`. | `/v1/ingest` | Cloudflare Access service-token ingest, Hive-managed catalog sync/cache, and the Windows compatibility-layer scanner when using the Windows branch. |
+| Upstream HTTP | You use stock upstream Bumblebee with its generic HTTP sink. | `/v1/compat/ingest/<device-id>` | HMAC/gzip ingest into Hive, raw batch storage, normalization, admin UI, and findings from records the upstream scanner submits. |
+
+The upstream HTTP path intentionally does not require Cloudflare Access
+service-token headers on the ingest request because upstream Bumblebee cannot
+send arbitrary static HTTP headers. Its auth boundary is the per-device HMAC
+signature. Keep `/v1/enroll`, `/v1/ingest`, `/v1/admin/*`, `/v1/ui/admin/*`,
+and `/v1/catalog/current` protected by Access.
+
+Upstream mode is ingest compatibility, not full feature parity with the
+managed branch. Hive-managed catalog sync/cache and the Windows compatibility
+layer require the managed branch. Operators who use upstream Bumblebee can
+still distribute an exposure catalog separately and pass it to upstream
+Bumblebee with its normal `--exposure-catalog` flag.
+
+Stock upstream Bumblebee can post to Hive with:
+
+```powershell
+$env:BUMBLEBEE_HIVE_DEVICE_ID = "<device-id-from-enrollment>"
+$env:BUMBLEBEE_HIVE_HMAC_KEY = "<hmac-key-from-enrollment>"
+
+bumblebee scan `
+  --profile baseline `
+  --output http `
+  --http-url "https://hive.example.com/v1/compat/ingest/$env:BUMBLEBEE_HIVE_DEVICE_ID" `
+  --http-auth hmac-sha256 `
+  --http-hmac-key-env BUMBLEBEE_HIVE_HMAC_KEY `
+  --http-gzip `
+  --device-id-env BUMBLEBEE_HIVE_DEVICE_ID
+```
 
 ## Deploy
 
@@ -127,6 +165,9 @@ Device enrollment accepts an optional JSON `environment` value of `production`
 or `test`. Omitted values are stored as `production`. Admin metadata views
 default to `environment=production` so local smoke tests and installer
 validation devices do not pollute operator views.
+
+Enrollment responses include both `ingest_path` for managed branch clients and
+`upstream_ingest_path` for stock upstream Bumblebee HTTP/HMAC clients.
 
 ## Admin UI
 
@@ -363,10 +404,10 @@ contents API.
 ## Windows Bootstrapper
 
 The self-service installer downloads Bumblebee, verifies the release checksum,
-enrolls the endpoint with `bumblebee hive join`, writes the Hive
-compatibility-layer `config.json` and `secrets.json`, writes a scheduled
-`bumblebee hive run` wrapper, and optionally registers a current-user scheduled
-task.
+enrolls the endpoint with Hive, writes local `config.json` and `secrets.json`,
+writes a scheduled wrapper, and optionally registers a current-user scheduled
+task. It defaults to `-BumblebeeMode ManagedHive`, which expects the managed
+Bumblebee branch and generates a `bumblebee hive run` wrapper.
 
 Dry-run the installer:
 
@@ -408,6 +449,27 @@ config, secrets, and cache roots. Bumblebee uses HMAC for payload integrity.
 The default generated scan profile is `baseline`; tests and bounded campaign
 installs can pass `-Environment test -ScanProfile project -ScanRoot <path>`.
 The installer reuses an existing local Hive identity by default when rerun.
+
+Use `-BumblebeeMode UpstreamHttp` for stock upstream Bumblebee. In that mode,
+the installer calls Hive enrollment itself, writes the upstream-compatible
+ingest path, and generates a wrapper that runs `bumblebee scan --output http`
+with `--http-auth hmac-sha256`, `--http-gzip`, and `--device-id-env`. It does
+not use `bumblebee hive join` or `bumblebee hive run`.
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-bumblebee.ps1 `
+  -BumblebeeMode UpstreamHttp `
+  -HiveBaseUrl https://hive.example.com `
+  -AccessClientId $env:BUMBLEBEE_HIVE_ACCESS_CLIENT_ID `
+  -AccessClientSecret $env:BUMBLEBEE_HIVE_ACCESS_CLIENT_SECRET `
+  -EnrollmentToken $env:BUMBLEBEE_HIVE_ENROLLMENT_TOKEN `
+  -SkipDownload `
+  -BumblebeeExePath .\bumblebee.exe
+```
+
+Use `-SkipDownload -BumblebeeExePath` when your upstream Bumblebee source does
+not publish a Windows release asset in the GoReleaser zip layout expected by
+this installer.
 
 Uninstall removes only local generated state: the scheduled task, wrapper,
 Hive secrets, config, and installed `bumblebee.exe`. Remote Hive device
@@ -497,8 +559,13 @@ object keys, or `summary_json`.
 
 ## API Reference
 
+Device ingest endpoints:
+
+- `POST /v1/ingest`: managed branch ingest; protected by Cloudflare Access service-token headers, `X-Inventory-Device-Id`, and per-device HMAC.
+- `POST /v1/compat/ingest/<device-id>`: upstream-compatible ingest; protected by per-device HMAC and does not require custom static headers.
+
 Admin script endpoints are protected by the same Cloudflare Access gate as
-ingest and also require `X-Hive-Admin-Token`. Responses include
+managed ingest and also require `X-Hive-Admin-Token`. Responses include
 `Cache-Control: no-store`.
 
 ```powershell
